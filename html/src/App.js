@@ -1,15 +1,229 @@
 import React, {Component} from 'react';
-import AceEditor from 'react-ace';
-import ReactMarkdown from 'react-markdown';
+import {createRoot} from 'react-dom/client';
+import AceEditor from 'react-ace'; // https://github.com/securingsincity/react-ace/blob/master/docs/Ace.md
 import SampleAnalyst from './SampleAnalyst.js';
 import './App.css';
-import tutorials from './tutorials.json';
 
 import 'ace-builds/src-noconflict/mode-python';
 import 'ace-builds/src-noconflict/mode-markdown';
 import 'ace-builds/src-noconflict/theme-github';
 
-const PythonContext = React.createContext('Python is loading...');
+function compareCanvases(liveCanvas, goalCanvas, diffCanvas, backgroundColour) {
+    const width = liveCanvas.width,
+        height = liveCanvas.height,
+        backgroundPixel = [
+            parseInt(backgroundColour.substring(1, 3), 16),
+            parseInt(backgroundColour.substring(3, 5), 16),
+            parseInt(backgroundColour.substring(5, 7), 16),
+            255
+        ],
+        liveContext = liveCanvas.getContext('2d', {willReadFrequently: true}),
+        goalContext = goalCanvas.getContext('2d', {willReadFrequently: true}),
+        diffContext = diffCanvas.getContext('2d'),
+        liveData = liveContext.getImageData(0, 0, width, height),
+        goalData = goalContext.getImageData(0, 0, width, height),
+        diffData = diffContext.createImageData(width, height),
+        darkerPositions = [],
+        lighterPositions = [],
+        minDiffCount = 100; // Add surrounding highlights if fewer diffs.
+    let diffCount = 0,
+        foregroundCount = 0;
+    for (let x=0; x < width; x++) {
+        for (let y=0; y < height; y++) {
+            const livePixel = slicePixel(liveData, x, y),
+                goalPixel = slicePixel(goalData, x, y),
+                [diffSign, diffPixel] = comparePixel(livePixel, goalPixel),
+                isLiveBackground = comparePixel(livePixel, backgroundPixel)[0] === 0,
+                isGoalBackground = comparePixel(goalPixel, backgroundPixel)[0] === 0,
+                start = pixelStart(diffData, x, y);
+            if ( ! (isLiveBackground && isGoalBackground)) {
+                foregroundCount += 1;
+            }
+            if (diffSign !== 0) {
+                diffCount += 1;
+                if (diffCount > minDiffCount) {
+                    // Stop tracking positions.
+                }
+                else if (diffSign < 0) {
+                    darkerPositions.push([x, y]);
+                }
+                else {
+                    lighterPositions.push([x, y]);
+                }
+            }
+            diffData.data.set(diffPixel, start);
+        }
+    }
+    addHighlights(minDiffCount, diffData, lighterPositions, darkerPositions);
+    diffContext.putImageData(diffData, 0, 0);
+    return 100*(1 - (diffCount / foregroundCount));
+}
+
+/** Draw an outline around changed pixels, if there aren't many.
+ * @param minDiffCount minimum number of pixels that must be highlighted.
+ * @param imageData diff display
+ * @param lighterPositions x and y values for pixels where live canvas is
+ * lighter than expected.
+ * @param darkerPositions x and y values for pixels where live canvas is
+ * darker than expected.
+ */
+function addHighlights(
+        minDiffCount,
+        imageData,
+        lighterPositions,
+        darkerPositions) {
+    const diffCount = lighterPositions.length + darkerPositions.length;
+    if (diffCount === 0 || diffCount >= minDiffCount) {
+        return;
+    }
+    const lighterBins = [],
+        darkerBins = [],
+        equalBins = [],
+        width = imageData.width,
+        height = imageData.height,
+        maxDist = Math.ceil(Math.sqrt(8 * minDiffCount / Math.pi)) + 1;
+
+    // Add sentinel values to empty arrays.
+    if (darkerPositions.length === 0) {
+        darkerPositions.push([width*2, height*2])
+    }
+    if (lighterPositions.length === 0) {
+        lighterPositions.push([width*2, height*2])
+    }
+    for (let x = 0; x < width; x++) {
+        for (let y = 0; y < height; y++) {
+            const lighterDists = lighterPositions.map(
+                    ([x0, y0]) => Math.sqrt((x - x0)**2 + (y - y0)**2)),
+                darkerDists = darkerPositions.map(
+                    ([x0, y0]) => Math.sqrt((x - x0)**2 + (y - y0)**2)),
+                minLighterDist = Math.round(Math.min(...lighterDists)),
+                minDarkerDist = Math.round(Math.min(...darkerDists)),
+                minDist = Math.min(minLighterDist, minDarkerDist),
+                targetBins = minLighterDist < minDarkerDist
+                    ? lighterBins
+                    : minDarkerDist < minLighterDist
+                    ? darkerBins
+                    : equalBins;
+            if (minDist > maxDist) {
+                continue;
+            }
+            while (targetBins.length <= minDist) {
+                targetBins.push([]);
+            }
+            targetBins[minDist].push([x, y]);
+        }
+    }
+
+    const red = [255, 0, 0, 255],
+        blue = [0, 0, 255, 255],
+        purple = [255, 0, 255, 255];
+    let skippedCount = 0,
+        markedCount = 0,
+        pixelCount = width * height;
+    for (let distance = 0;
+            markedCount < minDiffCount
+            && (markedCount + skippedCount < pixelCount);
+            distance++) {
+        for (const [distanceBin, colour] of [
+                [lighterBins[distance], red],
+                [darkerBins[distance], blue],
+                [equalBins[distance], purple]]) {
+            if (distanceBin === undefined) {
+                continue;
+            }
+            const distanceCount = distanceBin.length;
+            if (distance > 0 && skippedCount < minDiffCount) {
+                skippedCount += distanceCount;
+            }
+            else {
+                markedCount += distanceCount;
+                if (distance > 0) {
+                    for (const position of distanceBin) {
+                        const startOffset = pixelStart(imageData, ...position);
+                        imageData.data.set(colour, startOffset);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/** Compare two pixels
+ *
+ * If the two colours are within the tolerance, choose a faded version of the
+ * colour, otherwise add red or blue to highlight the difference.
+ * @param colour1 first colour to compare
+ * @param colour2 other colour to compare to
+ * @param [tolerance] maximum difference between r, g, b components
+ *  of the two colours.
+ * @return Array [diff, [r, g, b, alpha]] where diff is -1 when colour1 is
+ *  darker than colour2, +1 when colour1 is lighter, and 0 when they match. The
+ *  returned colour has a lower opacity when colour1 and colour2 match. It has
+ *  maximum red if colour1 is lighter than colour2 or maximum blue if it's
+ *  darker.
+ */
+function comparePixel(colour1, colour2, tolerance) {
+    if (tolerance === undefined) {
+        tolerance = 2;
+    }
+    const [r1, g1, b1, a1] = colour1,
+        [r2, g2, b2, a2] = colour2,
+        maxDiff = Math.max(
+            Math.abs(r1-r2),
+            Math.abs(g1-g2),
+            Math.abs(b1-b2));  // ignore alpha differences
+    if (tolerance < maxDiff) {
+        // Highlight difference
+        // Colour
+        const actual_norm = [r1, g1, b1, a1],
+            expected_norm = [r2, g2, b2, a2];
+
+        // reverse alpha, for consistent brightness comparison
+        actual_norm[3] = 255 - actual_norm[3]
+        expected_norm[3] = 255 - expected_norm[3]
+
+        // sum squares to calculate distance squared from origin
+        const actual_dist = actual_norm.reduce((acc, v) => (acc + v*v), 0),
+            expected_dist = expected_norm.reduce((acc, v) => (acc + v*v), 0);
+
+        const dr = (actual_dist <= expected_dist)
+                ? Math.floor((r1+r2) / 5) // actual is darker, highlight in blue.
+                : 255, // actual is brighter, highlight in red.
+            dg = Math.floor((g1+g2) / 5),
+            db = (actual_dist <= expected_dist)
+                ? 255 // actual is darker, highlight in blue.
+                : Math.floor((b1+b2) / 5); // actual is brighter, highlight in red.
+
+        // Opacity
+        const da = Math.floor((a1 + a2)/2);
+
+        return [
+            Math.sign(actual_dist - expected_dist),
+            [dr, dg, db, da]
+        ];
+    }
+    return [0, [r1, g1, b1, Math.floor((a1 + a2)/6)]];
+}
+
+function pixelStart(imageData, x, y) {
+    return 4*(y*imageData.width + x);
+}
+
+function slicePixel(imageData, x, y) {
+    const start = pixelStart(imageData, x, y);
+    return imageData.data.slice(start, start+4);
+}
+
+function simpleHash(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36); // Return as base-36 string for shorter keys
+}
 
 class ProgressBar extends Component {
     render() {
@@ -18,10 +232,8 @@ class ProgressBar extends Component {
             (this.props.percentage < 100) ?
                 "warning" :
                 "success";
-        return <div className="progressbar-wrapper ">
-            <div className={"progressbar-filler " + stateClass}
-                 style={{width: `${this.props.percentage}%`}}/>
-        </div>;
+        // noinspection HtmlUnknownAttribute
+        return <progress className={stateClass} type={stateClass} value={`${this.props.percentage}`} max="100"/>;
     }
 }
 
@@ -37,16 +249,21 @@ class Editor extends Component {
         this.props.onScroll(this.content.current.editor.session.getScrollTop());
     }
 
-    componentDidUpdate() {
+    componentDidUpdate(prevProps, prevState, snapshot) {
         this.content.current.editor.session.setScrollTop(this.props.scrollTop);
         if (this.props.selectedLine !== this.state.selectedLine) {
             this.setState({selectedLine: this.props.selectedLine});
-            this.content.current.editor.gotoLine(this.props.selectedLine+1);
+            this.content.current.editor.gotoLine(
+                this.props.selectedLine+1,
+                0,
+                false);
         }
         this.content.current.editor.resize();
     }
 
     render() {
+        const height = this.props.height || "100%";
+        // noinspection JSUnresolvedVariable
         return <AceEditor
             ref={this.content}
             value={this.props.value}
@@ -58,7 +275,7 @@ class Editor extends Component {
             mode={this.props.mode}
             theme="github"
             width="100%"
-            height="100%"
+            height={height}
             fontSize={18}
             showPrintMargin={true}
             markers={this.props.markers}
@@ -73,73 +290,102 @@ class Editor extends Component {
             }}/>;
     }
 }
-
-class FootnoteBuilder extends Component {
-    render() {
-        let coreProps = {href: this.props.href};
-        if (this.props['data-sourcepos']) {
-            coreProps['data-sourcepos'] = this.props['data-sourcepos'];
-        }
-        let match = /^#(footnote\d+)$/i.exec(coreProps.href);
-        if (match !== null) {
-            coreProps.name = match[1] + "ref";
-        } else {
-            match = /^#(footnote\d+)ref$/i.exec(coreProps.href);
-            if (match !== null) {
-                coreProps.name = match[1];
-            }
-        }
-        return React.createElement('a', coreProps, this.props.children);
-    }
-}
-
+/*
+Render the code sample in the code editor.
+The default code rendered is retrieved from the Markdown files (e.g. `/docs/demo/flags/romania-colombia.md`). Each code block is demarcated by an indentation in the Markdown file.
+When the user edits the code editor (an `AceEditor` component), the new value is saved to localStorage.
+*/
 class CodeSample extends Component {
-    static contextType = PythonContext;
-
     constructor(props) {
         super(props);
-        let codeRunner = this.context === null ? window.analyze : undefined,
-            analyst = new SampleAnalyst(props.value, codeRunner);
+        const persistedSource = props.storageKey ? localStorage.getItem(props.storageKey) : null;
+        const initialSource = props.source;
+        const analyst = new SampleAnalyst(initialSource);
+        const sourceCode = persistedSource || analyst.sourceCode;
         this.state = {
             scrollTop: 0,
             selectedLine: undefined,
             isPythonLoaded: false,
-            source: analyst.sourceCode,
+            hasDisplayed: false,
+            source: sourceCode,
             originalSource: analyst.sourceCode,
             goalSourceCode: analyst.goalSourceCode,
             display: analyst.display,
             goalOutput: analyst.goalOutput,
+            goalCanvasCommands: analyst.goalCanvasCommands,
             output: analyst.output,
             goalMarkers: analyst.goalMarkers,
             outputMarkers: analyst.outputMarkers,
             matchPercentage: analyst.matchPercentage,
             isLive: analyst.isLive,
             isCanvas: analyst.isCanvas,
-            canvasCommands: analyst.canvasCommands
+            canvasCommands: analyst.canvasCommands,
+            canvasWidth: undefined,
+            canvasHeight: undefined
         };
 
         this.handleChange = this.handleChange.bind(this);
+        this.scheduleUpdate = this.scheduleUpdate.bind(this);
+        this.updateDisplay = this.updateDisplay.bind(this);
         this.handleReset = this.handleReset.bind(this);
         this.handleScroll = this.handleScroll.bind(this);
         this.handleCursorChange = this.handleCursorChange.bind(this);
 
+        props.spaceTracerPromise.then(() => {
+            this.setState({isPythonLoaded: true})
+        }).catch((err) => {
+            console.error(`Space Tracer could not load: ${err}`);
+        });
+
         this.editorRef = React.createRef();
         this.canvasRef = React.createRef();
+        this.goalCanvasRef = React.createRef();
+        this.diffCanvasRef = React.createRef();
     }
 
     handleChange(newSource) {
-        if (newSource === undefined) {
-            newSource = this.state.source;
+        if (newSource !== undefined) {
+            this.setState({source: newSource});
+            if (this.props.storageKey) {
+                localStorage.setItem(this.props.storageKey, newSource);
+            }
         }
-        let codeRunner = this.context === null ? window.analyze : undefined,
+        this.scheduleUpdate();
+    }
+
+    scheduleUpdate() {
+        if (this.updateTimer !== undefined) {
+            return;
+        }
+        this.updateTimer = setInterval(this.updateDisplay, 300);
+    }
+
+    updateDisplay() {
+        if (this.updateTimer !== undefined) {
+            clearInterval(this.updateTimer);
+        }
+        let codeRunner = this.state.isPythonLoaded
+                ? window.analyzeLivePython
+                : undefined,
             canvas = this.canvasRef.current,
-            canvasSize = canvas === null
+            canvasSize,
+            isResized = false,
+            newSource = this.state.source;
+        if (canvas !== null) {
+            this.resizeCanvas(canvas);
+            canvasSize = [canvas.width, canvas.height];
+            isResized = (canvas.width !== this.state.canvasWidth ||
+                canvas.height !== this.state.canvasHeight);
+        }
+        let goalOutput = isResized ? undefined : this.state.goalOutput,
+            goalCanvasCommands = isResized
                 ? undefined
-                : [canvas.width, canvas.height],
+                : this.state.goalCanvasCommands,
             analyst = new SampleAnalyst(
                 newSource,
                 codeRunner,
-                this.state.goalOutput,
+                goalOutput,
+                goalCanvasCommands,
                 this.state.goalSourceCode,
                 this.state.isLive,
                 this.state.isCanvas,
@@ -152,13 +398,55 @@ class CodeSample extends Component {
             goalOutput: analyst.goalOutput,
             goalMarkers: analyst.goalMarkers,
             outputMarkers: analyst.outputMarkers,
-            matchPercentage: analyst.matchPercentage,
-            canvasCommands: analyst.canvasCommands
+            canvasCommands: analyst.canvasCommands,
+            goalCanvasCommands: analyst.goalCanvasCommands
         });
-        this.drawCanvas(analyst.canvasCommands);
+        this.updateTimer = undefined;
+        Promise.all(analyst.imagePromises).then(() => {
+            analyst.imagePromises.length = 0;
+            this.drawCanvas(analyst.canvasCommands, this.canvasRef);
+            this.drawCanvas(analyst.goalCanvasCommands, this.goalCanvasRef);
+            let matchPercentage = this.compareCanvases(analyst.goalCanvasCommands);
+            if (matchPercentage === undefined) {
+                matchPercentage = analyst.matchPercentage;
+            }
+            this.setState({matchPercentage: matchPercentage});
+        });
+        if (isResized) {
+            this.setState({
+                canvasWidth: canvasSize[0],
+                canvasHeight: canvasSize[1]
+            });
+        }
+    }
+
+    compareCanvases(goalCanvasCommands) {
+        const liveCanvas = this.canvasRef.current,
+            goalCanvas = this.goalCanvasRef.current,
+            diffCanvas = this.diffCanvasRef.current;
+        let matchPercentage = undefined;
+        if (diffCanvas !== null) {
+            diffCanvas.width = liveCanvas.width;
+            diffCanvas.height = liveCanvas.height;
+            let backgroundColor = '#ffffff';
+            for (let command of goalCanvasCommands) {
+                if (command.name === 'bgcolor') {
+                    backgroundColor = command.fill;
+                }
+            }
+            matchPercentage = compareCanvases(
+                liveCanvas,
+                goalCanvas,
+                diffCanvas,
+                backgroundColor);
+        }
+        return matchPercentage;
     }
 
     handleReset() {
+        if (this.props.storageKey) {
+            localStorage.removeItem(this.props.storageKey);
+        }
         this.handleChange(this.state.originalSource);
     }
 
@@ -167,6 +455,7 @@ class CodeSample extends Component {
     }
 
     handleCursorChange(selection) {
+        // noinspection JSUnresolvedFunction
         this.setState({selectedLine: selection.getSelectionLead().row});
     }
 
@@ -178,23 +467,72 @@ class CodeSample extends Component {
 
     componentDidMount() {
         window.addEventListener('resize', this.handleResize);
-        this.drawCanvas(this.state.canvasCommands);
+        this.drawCanvas(this.state.canvasCommands, this.canvasRef);
+        this.drawCanvas(this.state.goalCanvasCommands, this.goalCanvasRef);
+        this.scheduleUpdate();
     }
 
     componentWillUnmount() {
         window.removeEventListener('resize', this.handleResize);
     }
 
-    drawCanvas(commands) {
-        const canvas = this.canvasRef.current;
+    calculateEditorHeight() {
+        const textHeight = (1 + this.countLines(this.state.source))*18,
+            viewHeight = Math.round(window.innerHeight * 0.8);
+        if (this.state.goalSourceCode !== undefined) {
+            return Math.min(textHeight, Math.floor(viewHeight / 2));
+        }
+        return Math.min(textHeight, viewHeight);
+    }
+
+    calculateCanvasHeight() {
+        const aspectHeight = this.editorRef.current.clientWidth * 0.75,
+            minHeight = this.editorRef.current.clientHeight,
+            viewHeight = Math.round(window.innerHeight * 0.8);
+        if (this.state.goalSourceCode !== undefined) {
+            return Math.min(
+                Math.max(aspectHeight, minHeight),
+                Math.floor(viewHeight / 2));
+        }
+        return Math.min(Math.max(aspectHeight, minHeight), viewHeight);
+    }
+
+    calculateGoalHeight() {
+        if (this.state.isCanvas) {
+            return this.calculateCanvasHeight();
+        }
+        const outputLines = Math.max(
+                this.countLines(this.state.goalOutput),
+                this.countLines(this.state.output)),
+            textHeight = outputLines*18,
+            viewHeight = Math.round(window.innerHeight * 0.8);
+        return Math.min(textHeight, Math.floor(viewHeight / 2));
+    }
+
+    resizeCanvas(canvas) {
+        let nodeStyle = window.getComputedStyle(canvas.parentElement, null),
+            leftPadding = parseInt(nodeStyle.getPropertyValue('padding-left')),
+            rightPadding = parseInt(nodeStyle.getPropertyValue('padding-right')),
+            topPadding = parseInt(nodeStyle.getPropertyValue('padding-top')),
+            bottomPadding = parseInt(nodeStyle.getPropertyValue('padding-bottom'));
+        canvas.width = (this.editorRef.current.clientWidth -
+            leftPadding - rightPadding);
+        canvas.height = (this.calculateCanvasHeight() -
+            topPadding - bottomPadding);
+    }
+
+    drawCanvas(commands, canvasRef) {
+        const canvas = canvasRef.current;
         if ((canvas === null) || (commands === undefined)) {
             return;
         }
-        canvas.width = this.editorRef.current.clientWidth;
-        canvas.height = this.editorRef.current.clientHeight;
-        const ctx = canvas.getContext('2d');
+        this.resizeCanvas(canvas);
+        const ctx = canvas.getContext('2d', {willReadFrequently: true});
+        ctx.translate(0.5, 0.5); // Centre lines on pixels.
         ctx.lineCap = 'round';
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         for (const command of commands) {
             if (command.name === 'bgcolor') {
                 ctx.fillStyle = command.fill;
@@ -226,18 +564,25 @@ class CodeSample extends Component {
                     : 'center';
                 ctx.fillText(command.text, command.coords[0], command.coords[1]);
             }
+            else if (command.name === 'create_image') {
+                ctx.drawImage(command.image, command.coords[0], command.coords[1]);
+            }
         }
     }
 
-    componentDidUpdate(prevProps, prevState) {
-        if (this.context !== null) {
-            if (this.context !== this.state.display) {
-                this.setState({display: this.context});
-            }
+    componentDidUpdate(prevProps, prevState, snapshot) {
+        if ( ! this.state.isPythonLoaded) {
+            // Continue waiting...
         }
-        else if ( ! this.state.isPythonLoaded) {
-            this.handleChange();
-            this.setState({isPythonLoaded: true});
+        else if ( ! this.state.hasDisplayed) {
+            this.setState({hasDisplayed: true});
+            this.scheduleUpdate();
+        }
+        else if ((5 < Math.abs(prevState.canvasWidth - this.state.canvasWidth)) ||
+                (prevState.source !== this.state.source) ||
+                (prevState.goalCanvasCommands === undefined &&
+                    this.state.goalCanvasCommands !== undefined)) {
+            this.scheduleUpdate();
         }
     }
 
@@ -246,32 +591,37 @@ class CodeSample extends Component {
     }
 
     render() {
-        let displayValue = this.context;
-        if (displayValue === null) {
+        let displayValue = 'Python is loading...';
+        if (this.state.isPythonLoaded) {
             displayValue = this.state.display;
         }
         let displayDiv = null,
             progressBar = null,
-            outputHeaders = null,
             outputSection = null,
             resetButton = null,
-            sourceLineCount = 1 + this.countLines(this.state.source);
+            editorHeight = this.calculateEditorHeight();
         if (this.state.isLive) {
             if (this.state.isCanvas) {
-                displayDiv = <canvas
-                    ref={this.canvasRef}
-                    height={sourceLineCount*18}/>;
+                displayDiv = <div className="tile is-parent">
+                    <div className="tile is-child box">
+                        <canvas ref={this.canvasRef}/>
+                    </div>
+                </div>;
             } else {
-                displayDiv = <div className="editor-pane">
-                    <Editor
-                        value={displayValue}
-                        scrollTop={this.state.scrollTop}
-                        readOnly={true}
-                        selectedLine={this.state.selectedLine}
-                        onChange={this.handleChange}
-                        onScroll={this.handleScroll}
-                        highlightActiveLine={true}
-                        mode="text"/>
+                displayDiv = <div className="tile is-parent">
+                    <div
+                        className="editor-pane tile is-child box">
+                        <Editor
+                            value={displayValue}
+                            scrollTop={this.state.scrollTop}
+                            readOnly={true}
+                            selectedLine={this.state.selectedLine}
+                            height={editorHeight + "px"}
+                            onChange={this.handleChange}
+                            onScroll={this.handleScroll}
+                            highlightActiveLine={true}
+                            mode="text"/>
+                    </div>
                 </div>;
             }
         }
@@ -281,55 +631,79 @@ class CodeSample extends Component {
             </div>;
         }
         if (this.state.goalOutput !== undefined) {
-            let outputLineCount = this.countLines(this.state.output),
-                goalLineCount = this.countLines(this.state.goalOutput),
-                outputSize = Math.min(
-                    50, 1 + Math.max(outputLineCount, goalLineCount));
-            progressBar = <ProgressBar percentage={this.state.matchPercentage}/>;
-            outputHeaders = <div className="editor-wrapper">
-                <h4 className="editor-header">Goal output</h4>
-                <h4 className="editor-header">Your output</h4>
+            const goalHeight = this.calculateGoalHeight(),
+                diffPercentage = Math.ceil(100 - this.state.matchPercentage);
+            progressBar = <div className="tile is-parent">
+                <ProgressBar className="tile is-child box"
+                             percentage={this.state.matchPercentage}/>
             </div>;
-            outputSection = <div className="editor-wrapper">
-                <div className="editor-pane"
-                     style={{height: outputSize*18 + "px"}}>
-                    <Editor
-                        value={this.state.goalOutput}
-                        markers={this.state.goalMarkers}
-                        readOnly={true}
-                        highlightActiveLine={false}
-                        mode="text"/>
-                </div>
-                <div className="editor-pane">
-                    <Editor
-                        value={this.state.output}
-                        markers={this.state.outputMarkers}
-                        readOnly={true}
-                        highlightActiveLine={false}
-                        mode="text"/>
-                </div>
-            </div>;
+            if (this.state.isCanvas) {
+                outputSection = <div className="editor-wrapper tile">
+                    <div className="tile is-parent">
+                        <div className="editor-wrapper tile is-vertical is-child box">
+                            <p className="subtitle">Goal Canvas</p>
+                            <canvas ref={this.goalCanvasRef}/>
+                        </div>
+                    </div>
+                    <div className="tile is-parent">
+                        <div className="editor-wrapper tile is-vertical is-child box">
+                            <p className="subtitle">Canvas Differences
+                                ({diffPercentage}% of pixels)</p>
+                            <canvas ref={this.diffCanvasRef}/>
+                        </div>
+                    </div>
+                </div>;
+            } else {
+                outputSection = <div className="editor-wrapper tile">
+                    <div className="tile is-parent">
+                        <div className="editor-pane tile is-vertical is-child box">
+                            <p className="subtitle">Goal output</p>
+                            <Editor
+                                value={this.state.goalOutput}
+                                markers={this.state.goalMarkers}
+                                readOnly={true}
+                                highlightActiveLine={false}
+                                height={goalHeight}
+                                mode="text"/>
+                        </div>
+                    </div>
+                    <div className="tile is-parent">
+                        <div className="editor-pane tile is-vertical is-child box">
+                            <p className="subtitle">Your output
+                                ({diffPercentage}% of characters differ)</p>
+                            <Editor
+                                value={this.state.output}
+                                markers={this.state.outputMarkers}
+                                readOnly={true}
+                                highlightActiveLine={false}
+                                height={goalHeight}
+                                mode="text"/>
+                        </div>
+                    </div>
+                </div>;
+            }
         }
         return (
-            <div className="codeSample">
-                <div className="editor-wrapper">
-                    <div className="editor-pane"
-                        ref={this.editorRef}
-                        style={{height: sourceLineCount*18 + "px"}}>
-                        <Editor
-                            value={this.state.source}
-                            scrollTop={this.state.scrollTop}
-                            onChange={this.handleChange}
-                            onScroll={this.handleScroll}
-                            onCursorChange={this.handleCursorChange}
-                            highlightActiveLine={true}
-                            mode="python"/>
+            <div className="codeSample tile is-ancestor is-vertical">
+                <div className="editor-wrapper tile">
+                    <div className="tile is-parent">
+                        <div className="editor-pane tile is-child box"
+                             ref={this.editorRef}>
+                            <Editor
+                                value={this.state.source}
+                                scrollTop={this.state.scrollTop}
+                                height={editorHeight + "px"}
+                                onChange={this.handleChange}
+                                onScroll={this.handleScroll}
+                                onCursorChange={this.handleCursorChange}
+                                highlightActiveLine={true}
+                                mode="python"/>
+                        </div>
                     </div>
                     {displayDiv}
                 </div>
                 {resetButton}
                 {progressBar}
-                {outputHeaders}
                 {outputSection}
           </div>
     );
@@ -337,54 +711,83 @@ class CodeSample extends Component {
 }
 
 class App extends Component {
-    constructor(props) {
-        super(props);
-        let app = this;
-        this.state = {
-            source: tutorials['index'],
-            pythonMessage: 'Loading Python...'
-        };
-
-        // noinspection JSUnresolvedVariable
-        if (window.languagePluginLoader === undefined) {
-            this.state.pythonMessage = 'Python is not loaded!';
-        } else {
+    componentDidMount() {
+        const spaceTracerPromise = new Promise((resolve, reject) => {
             // noinspection JSUnresolvedVariable
-            window.languagePluginLoader.then(function() {
-                // noinspection JSUnresolvedVariable,JSUnresolvedFunction
-                window.pyodide.loadPackage('space-tracer').then(() => {
-                    // noinspection JSUnresolvedVariable,JSUnresolvedFunction
-                    window.pyodide.runPython(
-                        'from space_tracer.main import web_main; web_main()');
-                    app.setState({pythonMessage: null});
-                });
-            });
-        }
+            if (window.pyodidePromise === undefined) {
+                reject('Python is not loaded!');
+            } else {
+                let extraModules = window.liveCodingExtraModules;
+                if (extraModules === undefined) {
+                    extraModules = [];
+                } else {
+                    extraModules = extraModules.split(',');
+                }
+                let extraFiles = window.liveCodingExtraFiles;
+                if (extraFiles === undefined) {
+                    extraFiles = [];
+                } else {
+                    extraFiles = extraFiles.split(',');
+                }
+                // noinspection JSUnresolvedVariable
+                window.pyodidePromise.then(function() {
+                    for (const extraFile of extraFiles) {
+                        fetch(extraFile)
+                            .then((response) => response.blob())
+                            .then((blob) => blob.arrayBuffer())
+                            .then((buffer) => {
+                                const byteArray = new Int8Array(buffer);
+                                window.pyodide.FS.writeFile(
+                                    extraFile,
+                                    byteArray)
+                            });
+                    }
+                    for (const extraModule of extraModules) {
+                        // noinspection JSUnresolvedFunction
+                        window.pyodide.loadPackage(extraModule.trim());
+                    }
+                    // noinspection JSUnresolvedFunction
+                    window.pyodide.loadPackage('space-tracer').then(() => {
+                        // noinspection JSUnresolvedVariable,JSUnresolvedFunction
+                        window.pyodide.runPython(
+                            'from space_tracer.main import web_main; web_main()');
+                        resolve();
+                    }).catch((err) => reject(`Space Tracer failed: ${err}`));
+                }).catch((err) => reject(`Pyodide failed: ${err}`));
+            }
+        });
+
         let search = window.location.search;
         let params = new URLSearchParams(search);
         let tutorialName = params.get('tutorial');
         if (tutorialName) {
-            this.state.source = tutorials[tutorialName];
-            if (this.state.source === undefined) {
-                this.state.source = 'Tutorial not found: ' + tutorialName;
-            }
+            window.location = new URL(tutorialName, window.location);
+        }
+
+        const codeBlocks = document.getElementsByTagName('pre');
+        // The content that is initially rendered as <pre> elements are indicated by groups of indented lines in the source Markdown file. The `CodeSample` react component then replaces the <pre> elements with an instance of `AceEditor`.
+        for (const codeBlock of codeBlocks) {
+            const parent = codeBlock.parentNode;
+            const originalSource = codeBlock.innerText;
+            const hash = simpleHash(originalSource);
+            const storageKey = `${window.location.pathname}-codeblock-${hash}`;
+            // noinspection JSCheckFunctionSignatures
+            const root = createRoot(parent);
+            root.render(<CodeSample
+                source={codeBlock.innerText}
+                spaceTracerPromise={spaceTracerPromise}
+                storageKey={storageKey}
+            />);
         }
     }
 
     render() {
         return (
             <div className="app">
-                <PythonContext.Provider value={this.state.pythonMessage}>
-                    <ReactMarkdown
-                        source={this.state.source}
-                        renderers={{
-                            code: CodeSample,
-                            link: FootnoteBuilder
-                        }}/>
-                </PythonContext.Provider>
             </div>
         );
     }
 }
 
 export default App;
+export {compareCanvases, slicePixel};

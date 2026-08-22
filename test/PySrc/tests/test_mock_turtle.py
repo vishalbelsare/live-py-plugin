@@ -1,17 +1,18 @@
 import re
+from turtle import TurtleGraphicsError
 
 import pytest
 from space_tracer.canvas import Canvas
+from space_tracer.main import TraceRunner
 from space_tracer.mock_turtle import MockTurtle
 import turtle
-
-from test_report_builder import trim_report
 
 
 @pytest.fixture
 def patched_turtle():
     MockTurtle.monkey_patch()
-    yield
+    is_patched = True
+    yield is_patched
     MockTurtle.remove_monkey_patch()
 
 
@@ -41,6 +42,21 @@ def test_remove_patch_too_soon():
     with pytest.raises(RuntimeError,
                        match=r'MockTurtle is not monkey patched\.'):
         MockTurtle.remove_monkey_patch()
+
+
+def test_remove_patch_clears_screens():
+    dummy_screen = 'Dummy screen'
+
+    # noinspection PyTypeChecker
+    MockTurtle.screens.append(dummy_screen)
+    try:
+
+        MockTurtle.monkey_patch()
+        MockTurtle.remove_monkey_patch()
+
+        assert MockTurtle.screens == [dummy_screen]
+    finally:
+        MockTurtle.screens.clear()
 
 
 def test_forward(patched_turtle):
@@ -116,7 +132,7 @@ create_line
     0
     350
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 """
 
@@ -131,21 +147,80 @@ create_line
     assert report == expected_report.splitlines()
 
 
+def test_mode(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    0
+    -100
+    fill='black'
+    pensize=1
+"""
+
+    t = MockTurtle()
+    t.getscreen().mode('logo')
+    t.forward(100)
+
+    report = t.report
+
+    assert report == expected_report.splitlines()
+
+
 def test_dot(patched_turtle):
-    t2 = MockTurtle()
-    t2.up()
-    t2.goto(0, -2.5)
-    t2.begin_fill()
-    t2.circle(2.5)
-    t2.end_fill()
-    expected_report = t2.report
-    MockTurtle._screen = None
+    """ Draw dot with the rounded ends of a zero-length line. """
+    expected_report = """\
+create_line
+    0
+    0
+    0
+    0
+    fill='black'
+    pensize=5"""
 
     t = MockTurtle()
     t.dot()
     report = t.report
 
-    assert report == expected_report
+    assert report == expected_report.splitlines()
+
+
+def test_dot_rounding(patched_turtle):
+    """ Draw dot with the rounded ends of a zero-length line. """
+    expected_report = """\
+create_line
+    0
+    0
+    0
+    0
+    fill='black'
+    pensize=1
+create_line
+    1
+    0
+    1
+    0
+    fill='black'
+    pensize=1
+create_line
+    2
+    0
+    2
+    0
+    fill='black'
+    pensize=1"""
+
+    t = MockTurtle()
+    t.up()
+    t.back(0.5)
+    t.dot(1)
+    t.forward(1)
+    t.dot(1)
+    t.forward(1)
+    t.dot(1)
+    report = t.report
+
+    assert '\n'.join(report) == expected_report
 
 
 @pytest.mark.parametrize('image',
@@ -282,7 +357,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -308,7 +383,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='s'
     fill='black'
@@ -334,7 +409,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='se'
     fill='black'
@@ -360,7 +435,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -386,7 +461,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -396,6 +471,7 @@ create_text
 
     t = MockTurtle()
     t.fd(100)
+    # noinspection PyTypeChecker
     t.write('Bob', font=('Courier',))
     report = t.report
 
@@ -412,7 +488,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -422,6 +498,7 @@ create_text
 
     t = MockTurtle()
     t.fd(100)
+    # noinspection PyTypeChecker
     t.write('Bob', font='Courier')
     report = t.report
 
@@ -438,7 +515,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -448,6 +525,7 @@ create_text
 
     t = MockTurtle()
     t.fd(100)
+    # noinspection PyTypeChecker
     t.write('Bob', font=['Courier', 14, 'italic'])
     report = t.report
 
@@ -464,7 +542,7 @@ create_line
     fill='black'
     pensize=1
 create_text
-    100
+    99
     0
     anchor='sw'
     fill='black'
@@ -474,6 +552,7 @@ create_text
 
     t = MockTurtle()
     t.fd(100)
+    # noinspection PyTypeChecker
     t.write('Bob', font=None)
     report = t.report
 
@@ -490,6 +569,7 @@ def test_write_move():
 def test_write_bad_size():
     t = MockTurtle()
     with pytest.raises(ValueError):
+        # noinspection PyTypeChecker
         t.write('Bob', font=('Arial', 'eight', 'normal'))
 
 
@@ -529,38 +609,43 @@ create_line
     assert report == expected_report.splitlines()
 
 
-def test_color_bad(patched_turtle):
+@pytest.mark.parametrize(
+    'colour_in,colour_out',
+    [((0.1, 0.2, 0.3), (0.1, 0.2, 0.3)),
+     ('gray100', 'white'),
+     ('black', 'black'),
+     ('pink', 'pink'),
+     ('#00Ff00', 'green1')])
+def test_get_colour(colour_in, colour_out):
+    t = MockTurtle()
+    t.pencolor(colour_in)
+
+    c = t.pencolor()
+
+    assert c == colour_out
+
+
+@pytest.mark.parametrize(
+    'colour_in,expected_error',
+    [((1.0, 0.0), 'bad color arguments: (1.0, 0.0)'),  # only two numbers
+     ((1.0, 0.0, 1.5), 'bad color sequence: (1.0, 0.0, 1.5)'),  # over 1.0
+     ('brightyellow', 'bad color string: brightyellow'),
+     ('#1234567', 'bad color string: #1234567')])
+def test_bad_colour(patched_turtle, colour_in, expected_error):
     expected_report = """\
 create_line
     0
     0
     100
     0
-    fill='#000000'
+    fill='black'
     pensize=1"""
 
     t = MockTurtle()
-    # noinspection PyTypeChecker
-    t.color((1.0, 0.0))  # Only two numbers, fails to black.
     t.fd(100)
-    report = t.report
-
-    assert report == expected_report.splitlines()
-
-
-def test_color_bad_range(patched_turtle):
-    expected_report = """\
-create_line
-    0
-    0
-    100
-    0
-    fill='#000000'
-    pensize=1"""
-
-    t = MockTurtle()
-    t.color(1.0, 0.0, 1.5)  # Over 1.0 not allowed, fails to black.
-    t.fd(100)
+    with pytest.raises(TurtleGraphicsError,
+                       match=re.escape(expected_error)):
+        turtle.color(colour_in)
     report = t.report
 
     assert report == expected_report.splitlines()
@@ -578,28 +663,12 @@ create_line
 
     t = MockTurtle()
     t.pen(pencolor=(0, 0, 1.0))
+    pen = t.pen()
     t.fd(100)
     report = t.report
 
     assert report == expected_report.splitlines()
-
-
-def test_get_color_names():
-    t = MockTurtle()
-    t.color('blue')
-    color = t.color()
-
-    # Before Python 3.6, dicts were not ordered, and either name was possible.
-    assert color in (('blue', 'blue'), ('blue1', 'blue1'))
-
-
-def test_get_color_rgb():
-    t = MockTurtle()
-    expected_color = (1.0, 0.0, 0.5)
-    t.color(expected_color)
-    color = t.color()
-
-    assert color == (expected_color, expected_color)
+    assert pen['pencolor'] == '#0000ff'
 
 
 def test_get_default_color():
@@ -607,6 +676,25 @@ def test_get_default_color():
     color = t.color()
 
     assert color == ('black', 'black')
+
+
+def test_colormode():
+    expected_report = """\
+create_line
+    0
+    0
+    100
+    0
+    fill='#007fff'
+    pensize=1"""
+
+    t = MockTurtle()
+    t.getscreen().colormode(255)
+    t.color(0, 127, 255)
+    t.fd(100)
+    report = t.report
+
+    assert report == expected_report.splitlines()
 
 
 def test_bgcolor(patched_turtle):
@@ -632,6 +720,58 @@ create_line
     assert report == expected_report.splitlines()
     assert color1 == 'white'
     assert color2 == 'green'
+
+
+def test_clearscreen(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    20
+    0
+    fill='black'
+    pensize=1"""
+
+    t = MockTurtle()
+    for i in range(4):
+        t.pensize(i+1)  # force new line
+        t.fd(100)
+        t.left(90)
+    t.getscreen().clear()
+
+    t2 = MockTurtle()
+    t2.fd(20)
+    report = t2.report
+
+    assert report == expected_report.splitlines()
+    assert not any(item['deleted']
+                   for item in t.getscreen().cv.items)
+
+
+def test_anonymous_turtle_after_clearscreen():
+    source = """\
+import turtle as t
+
+for i in range(5):
+    t.pensize(i+1)
+    t.forward(20)
+
+t.clearscreen()
+t.forward(30)
+"""
+    expected_report = """\
+create_line
+    0
+    0
+    30
+    0
+    fill='black'
+    pensize=1"""
+
+    runner = TraceRunner()
+    report = runner.trace_turtle(source)
+
+    assert report == expected_report
 
 
 def test_fill(patched_turtle):
@@ -674,11 +814,11 @@ create_line
 
 def test_is_filling():
     t = MockTurtle()
-    is_filling1 = t.fill()
+    is_filling1 = t.filling()
     t.begin_fill()
-    is_filling2 = t.fill()
+    is_filling2 = t.filling()
     t.end_fill()
-    is_filling3 = t.fill()
+    is_filling3 = t.filling()
 
     assert not is_filling1
     assert is_filling2
@@ -725,37 +865,35 @@ create_polygon
     0
     -9
     5
-    0
-    0
-    fill='#000000'
+    fill='black'
     outline=''
 create_line
     0
     0
     -9
     -5
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -9
     -5
     -7
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -7
     0
     -9
     5
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -9
     5
     0
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 """
 
@@ -764,6 +902,61 @@ create_line
     report = t.report
 
     assert report == expected_report.splitlines()
+
+
+def test_clearstamp(patched_turtle):
+    expected_report = """\
+create_polygon
+    0
+    0
+    -9
+    -5
+    -7
+    0
+    -9
+    5
+    fill='black'
+    outline=''
+create_line
+    0
+    0
+    -9
+    -5
+    fill='black'
+    pensize=1
+create_line
+    -9
+    -5
+    -7
+    0
+    fill='black'
+    pensize=1
+create_line
+    -7
+    0
+    -9
+    5
+    fill='black'
+    pensize=1
+create_line
+    -9
+    5
+    0
+    0
+    fill='black'
+    pensize=1
+"""
+
+    t = MockTurtle()
+    stamp1 = t.stamp()
+    t.up()
+    t.forward(100)
+    stamp2 = t.stamp()
+    t.clearstamp(stamp2)
+    report = t.report
+
+    assert report == expected_report.splitlines()
+    assert stamp1 != stamp2
 
 
 def test_forgotten_end_fill_with_stamp(patched_turtle):
@@ -777,37 +970,35 @@ create_polygon
     0
     -9
     5
-    0
-    0
-    fill='#000000'
+    fill='black'
     outline=''
 create_line
     0
     0
     -9
     -5
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -9
     -5
     -7
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -7
     0
     -9
     5
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     -9
     5
     0
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     0
@@ -855,21 +1046,21 @@ create_line
     0
     40
     0
-    fill='#000000'
+    fill='black'
     pensize=4
 create_line
     40
     0
     40
     40
-    fill='#000000'
+    fill='black'
     pensize=4
 create_line
     40
     40
     0
     40
-    fill='#000000'
+    fill='black'
     pensize=4
 create_polygon
     40
@@ -880,8 +1071,6 @@ create_polygon
     -7
     35
     -9
-    40
-    0
     fill='#008000'
     outline=''
 create_line
@@ -889,28 +1078,28 @@ create_line
     0
     45
     -9
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     45
     -9
     40
     -7
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     40
     -7
     35
     -9
-    fill='#000000'
+    fill='black'
     pensize=1
 create_line
     35
     -9
     40
     0
-    fill='#000000'
+    fill='black'
     pensize=1
 """
 
@@ -925,6 +1114,50 @@ create_line
     t.right(90)
     t.forward(40)
     t.end_fill()
+    report = t.report
+
+    assert report == expected_report.splitlines()
+
+
+def test_undo(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    100
+    0
+    fill='black'
+    pensize=1
+"""
+
+    t = MockTurtle()
+    t.forward(100)
+    t.right(90)
+    t.forward(100)
+    t.undo()
+    report = t.report
+
+    assert report == expected_report.splitlines()
+
+
+def test_undo_pen_change(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    50
+    0
+    fill='black'
+    pensize=1
+"""
+
+    t = MockTurtle()
+    t.forward(50)
+    t.right(90)
+    t.forward(20)
+    t.pensize(5)
+    t.undo()
+    t.undo()
     report = t.report
 
     assert report == expected_report.splitlines()
@@ -1018,9 +1251,81 @@ def test_bad_attribute():
     assert not hasattr(t, 'bogus')
 
 
-def test_screen_methods_exist():
-    """ Test that a couple of methods exist, but don't do anything. """
+def test_tracer(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    100
+    0
+    fill='black'
+    pensize=1
+"""
+    t = turtle
+
+    default_tracer = t.tracer()
+    t.forward(100)
+    t.tracer(10)
+    t.right(90)
+    t.forward(200)
+
+    assert default_tracer == 1
+    assert MockTurtle.get_all_reports() == expected_report.splitlines()
+
+
+def test_update(patched_turtle):
+    expected_report = """\
+create_line
+    0
+    0
+    100
+    0
+    fill='black'
+    pensize=1
+create_line
+    100
+    0
+    100
+    200
+    fill='black'
+    pensize=1
+"""
+    t = turtle
+
+    t.forward(100)
+    t.tracer(10)
+    t.right(90)
+    t.forward(200)
+    t.update()
+
+    assert MockTurtle.get_all_reports() == expected_report.splitlines()
+
+
+def test_speed():
+    all_speeds = set()
     t = MockTurtle()
 
-    t.screen.tracer()
-    t.screen.update()
+    all_speeds.add(t.speed())
+    t.speed(4)
+    all_speeds.add(t.speed())
+    t.speed('normal')
+    all_speeds.add(t.speed())
+    t.speed(2000)
+    all_speeds.add(t.speed())
+    t.pen(speed=5)
+    all_speeds.add(t.speed())
+    t.pen(dict(speed=7))
+    all_speeds.add(t.speed())
+
+    assert all_speeds == {0}
+
+
+def test_cleared_screen(patched_turtle):
+    """ Subclassing TurtleScreen can clear MockTurtle._pen object. """
+    original = turtle.Turtle._pen
+    turtle.Turtle._pen = None
+
+    report = MockTurtle.get_all_reports()
+
+    turtle.Turtle._pen = original
+    assert report == []

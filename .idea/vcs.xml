@@ -5,6 +5,9 @@
       <inspection_tool class="SubjectLimit" enabled="true" level="WARNING" enabled_by_default="true">
         <option name="RIGHT_MARGIN" value="50" />
       </inspection_tool>
+      <inspection_tool class="SubjectLimit" enabled="true" level="WARNING" enabled_by_default="true">
+        <option name="RIGHT_MARGIN" value="50" />
+      </inspection_tool>
     </profile>
   </component>
   <component name="VcsDirectoryMappings">

@@ -1,0 +1,69 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
+    <id>io.github.donkirkby.livepycharm</id>
+    <name>Live Coding in Python</name>
+    <version>0</version><!-- Replaced by version from build.gradle.kts. -->
+    <vendor url="https://donkirkby.github.io/live-py-plugin">Don Kirkby</vendor>
+
+    <description><![CDATA[
+      Lets you run your Python code as you type it. Displays variable values,
+      matplotlib, Pillow, Pyglet, or turtle graphics.
+    ]]></description>
+
+    <change-notes><![CDATA[
+        Support PyCharm 2025.1.2 and higher.
+        Stop the window from scrolling away after you undo in live coding mode.
+        Fix Read access error in PyCharm.
+        Highlight small differences in LiveImageDiffer.
+        Fix rounding error in live turtle coordinates.
+        Improve Pytest support.
+        Support Python 3.14.
+    ]]>
+    </change-notes>
+
+    <!-- please see http://www.jetbrains.org/intellij/sdk/docs/basics/getting_started/build_number_ranges.html for description -->
+    <!-- Replaced by version from build.gradle.kts. -->
+    <idea-version since-build="0.0.0"/>
+
+    <!-- please see http://www.jetbrains.org/intellij/sdk/docs/basics/getting_started/plugin_compatibility.html
+         on how to target different products -->
+    <depends>com.intellij.modules.lang</depends>
+    <depends>com.intellij.modules.python</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <fileEditorProvider
+                implementation="io.github.donkirkby.livepycharm.SplitFileEditorProvider"/>
+    </extensions>
+
+    <actions>
+        <action id="livepy.Start" class="io.github.donkirkby.livepycharm.StartAction" text="Start Live Coding"
+                description="Run Python code as you type it, and show variable values."
+                icon="LivePythonIcons.MEDIA_PLAY">
+            <add-to-group group-id="RunnerActions" anchor="last"/>
+        </action>
+        <action id="livepy.StartNewUI" class="io.github.donkirkby.livepycharm.StartActionNewUI" text="Start Live Coding"
+                description="Run Python code as you type it, and show variable values."
+                icon="LivePythonIcons.MEDIA_PLAY_DARK">
+            <add-to-group group-id="MainToolbarRight" anchor="after" relative-to-action="NewUiRunWidget"/>
+        </action>
+        <action id="livepy.Turtle" class="io.github.donkirkby.livepycharm.TurtleAction" text="Start Live Turtle"
+                description="Run Python code as you type it, and show a canvas for turtle graphics and more."
+                icon="LivePythonIcons.TURTLE">
+            <add-to-group group-id="RunnerActions" anchor="last"/>
+        </action>
+        <action id="livepy.TurtleNewUI" class="io.github.donkirkby.livepycharm.TurtleActionNewUI" text="Start Live Turtle"
+                description="Run Python code as you type it, and show a canvas for turtle graphics and more."
+                icon="LivePythonIcons.TURTLE_DARK">
+            <add-to-group group-id="MainToolbarRight" anchor="after" relative-to-action="livepy.StartNewUI"/>
+        </action>
+        <action id="livepy.Stop" class="io.github.donkirkby.livepycharm.StopAction" text="Stop Live Coding"
+                icon="LivePythonIcons.MEDIA_STOP">
+            <add-to-group group-id="RunnerActions" anchor="last"/>
+        </action>
+        <action id="livepy.StopNewUI" class="io.github.donkirkby.livepycharm.StopActionNewUI" text="Stop Live Coding"
+                icon="LivePythonIcons.MEDIA_STOP_DARK">
+            <add-to-group group-id="MainToolbarRight" anchor="after" relative-to-action="livepy.TurtleNewUI"/>
+        </action>
+    </actions>
+
+</idea-plugin>

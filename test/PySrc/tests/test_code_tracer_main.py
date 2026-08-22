@@ -1,13 +1,16 @@
+from textwrap import dedent
+
 import doctest
 import os
 import re
 import sys
+from pathlib import Path
 
 import pytest
 from unittest.mock import DEFAULT, patch
 
 from space_tracer import main
-from space_tracer.main import replace_input, TraceRunner, analyze
+from space_tracer.main import replace_input, TraceRunner, analyze_live_python
 from test_report_builder import ReportTestCase
 
 EXAMPLE_DRIVER_PATH = os.path.join(os.path.dirname(__file__),
@@ -21,12 +24,12 @@ EXAMPLE_LIB_PATH = os.path.join(os.path.dirname(__file__),
                                 'lib_in_package.py')
 EXAMPLE_PATCHING_DRIVER_PATH = os.path.join(os.path.dirname(__file__),
                                             'example_patching_driver.py')
-EXAMPLE_DRIVER_SYNTAX_ERROR_PATH = os.path.join(os.path.dirname(__file__),
-                                                'example_driver_syntax_error.py')
 EXAMPLE_PYCHARM_FAILURES_PATH = os.path.join(os.path.dirname(__file__),
                                              'example_pycharm_failures.py')
 EXAMPLE_SILENT_DRIVER_PATH = os.path.join(os.path.dirname(__file__),
                                           'example_silent_driver.py')
+CALLS_ZIPPED_PATH = os.path.join(os.path.dirname(__file__), 'calls_zipped.py')
+ZIPPED_EXAMPLE_PATH = Path(__file__).parent / 'zipped_example.zip'
 patch.multiple = patch.multiple  # Avoids PyCharm warnings.
 
 
@@ -137,6 +140,40 @@ return 43
         stdin.read.return_value = source
 
         main()
+
+        report = stdout.write.call_args_list[0][0][0]
+        self.assertReportEqual(expected_report, report)
+
+    @patch.multiple('sys', stdin=DEFAULT, stdout=DEFAULT, argv=[
+        'dummy.py',
+        '--traced_file', EXAMPLE_SOURCE_PATH,
+        '--traced', 'example_source',
+        EXAMPLE_DRIVER_PATH])
+    def test_driver_with_syntax_error(self, stdin, stdout):
+        source = dedent("""\
+            class A:
+                pass
+            
+            class B
+            """)
+        if sys.version_info < (3, 10):
+            expected_report = dedent("""\
+                class A: |
+                    pass |
+                         |
+                class B  | SyntaxError: invalid syntax
+                """)
+        else:
+            expected_report = dedent("""\
+                class A: |
+                    pass |
+                         |
+                class B  | SyntaxError: expected ':'
+                """)
+        stdin.read.return_value = source
+
+        with pytest.raises(SystemExit):
+            main()
 
         report = stdout.write.call_args_list[0][0][0]
         self.assertReportEqual(expected_report, report)
@@ -283,8 +320,15 @@ foo = 'Hello, World!' | ---------------------------------------------------- |
                       |   File "path/example_driver.py", line 6, in <module> |
                       |     assert 'fail' not in sys.argv, sys.argv[1:]      |
                       | AssertionError: ['fail', 'badly']                    |
-                      | ---------------------------------------------------- |
-"""
+                      | ---------------------------------------------------- |"""
+        expected_report_311 = """\
+foo = 'Hello, World!' | ---------------------------------------------------- |
+                      | Traceback (most recent call last):                   |
+                      |   File "path/example_driver.py", line 6, in <module> |
+                      |     assert 'fail' not in sys.argv, sys.argv[1:]      |
+                      |            ^^^^^^^^^^^^^^^^^^^^^^                    |
+                      | AssertionError: ['fail', 'badly']                    |
+                      | ---------------------------------------------------- |"""
 
         stdin.read.return_value = source
 
@@ -294,7 +338,10 @@ foo = 'Hello, World!' | ---------------------------------------------------- |
         report = stdout.write.call_args_list[0][0][0]
         report = self.trim_exception(report)
         expected_report = self.trim_exception(expected_report)
-        self.assertReportEqual(expected_report, report)
+        expected_report_311 = self.trim_exception(expected_report_311)
+        # self.assertReportEqual(expected_report, report)
+        if report != expected_report_311:
+            assert report == expected_report
 
     # noinspection DuplicatedCode
     @patch.multiple('sys', stdin=DEFAULT, stdout=DEFAULT, argv=[
@@ -331,6 +378,18 @@ def foo(x):                     | x = 1
     # This is shown, as normal. |
     return x                    | return 1"""
 
+        expected_report_311 = """\
+def bar():                      | ---------------------------------------------------- |
+    # This would normally       | Traceback (most recent call last):                   |
+    # be hidden because of      |   File "path/example_driver.py", line 6, in <module> |
+    # --traced, but the start   |     assert 'fail' not in sys.argv, sys.argv[1:]      |
+    # is shown so you can see   |            ^^^^^^^^^^^^^^^^^^^^^^                    |
+    # the error.                | AssertionError: ['fail', 'badly']                    |
+    return 42                   | ---------------------------------------------------- |
+def foo(x):                     | x = 1
+    # This is shown, as normal. |
+    return x                    | return 1"""
+
         stdin.read.return_value = source
 
         with self.assertRaises(SystemExit):
@@ -339,7 +398,9 @@ def foo(x):                     | x = 1
         report = stdout.write.call_args_list[0][0][0]
         report = self.trim_exception(report)
         expected_report = self.trim_exception(expected_report)
-        assert report == expected_report
+        expected_report_311 = self.trim_exception(expected_report_311)
+        if report != expected_report:
+            assert report == expected_report_311
 
     # noinspection DuplicatedCode
     @patch.multiple('sys', stdin=DEFAULT, stdout=DEFAULT, argv=[
@@ -414,13 +475,6 @@ BAR = 'baz'
 ----------------------------------------------------------------------------------- |
 example_driver.py doesn't call the different_source module. Try a different driver. |
 ----------------------------------------------------------------------------------- |
-
-
-
-
-
-
-
 """
         stdin.read.return_value = source
 
@@ -483,13 +537,6 @@ BAR = 'baz'
 ------------------------------------------------ |
 Run config 'example' is bad, try something else. |
 ------------------------------------------------ |
-
-
-
-
-
-
-
 """
         stdin.read.return_value = source
 
@@ -569,9 +616,19 @@ SystemExit: True |
 y = 510
 AssertionError: 510
 """
-        if sys.version_info < (3, 0):
-            expected_report = expected_report.replace('(failures=1)',
-                                                      'FAIL        ')
+        expected_report_312 = """\
+------------- |
+SystemExit: 1 |
+------------- | | x = 10
+                | return 510
+
+
+
+y = 510
+AssertionError: 510
+"""
+        if (3, 12, 0) <= sys.version_info:
+            expected_report = expected_report_312
 
         stdin.read.return_value = source
 
@@ -663,6 +720,7 @@ return 542
     def trim_exception(report):
         report = re.sub(r"([ -])+\| *$", "", report, flags=re.MULTILINE)
         report = re.sub(r"line \d+", "line 9999", report)
+        report = re.sub(r" +$", "", report)
         report = report.replace("IOError", "FileNotFoundError")
         report = report.replace('path/example_driver.py', EXAMPLE_DRIVER_PATH)
         report = report.replace('path/doctest.py',
@@ -768,7 +826,76 @@ end_canvas
 
     main()
 
-    assert expected_report == stdout.getvalue()
+    assert stdout.getvalue() == expected_report
+
+
+def test_canvas_with_live_display(stdin, stdout, argv):
+    argv.extend([
+        'dummy.py',
+        '--source_width', '0',
+        '--traced_file', EXAMPLE_SOURCE_PATH,
+        '--canvas'])
+    source = """\
+from turtle import *
+i = 100
+forward(i)
+j = 0
+"""
+    expected_report = """\
+start_canvas
+create_line
+    400
+    300
+    500
+    300
+    fill='black'
+    pensize=1
+end_canvas
+.
+
+i = 100
+
+j = 0
+"""
+    stdin.read.return_value = source
+
+    main()
+
+    assert stdout.getvalue() == expected_report
+
+
+def test_canvas_without_live_display(stdin, stdout, argv):
+    argv.extend([
+        'dummy.py',
+        '--source_width', '0',
+        '--traced_file', EXAMPLE_SOURCE_PATH,
+        '--canvas_only',
+        '--millisecond_limit', '10000'])
+    source = """\
+from turtle import *
+i = 100
+forward(i)
+for j in range(300):
+    pass
+"""
+    expected_report = """\
+start_canvas
+create_line
+    400
+    300
+    500
+    300
+    fill='black'
+    pensize=1
+end_canvas
+.
+
+"""
+    stdin.read.return_value = source
+
+    main()
+
+    assert stdout.getvalue() == expected_report
 
 
 def test_canvas_error(stdin, stdout, argv):
@@ -837,6 +964,27 @@ SystemExit: Bad stuff. | SystemExit: Bad stuff.
     assert ctx.value.code == 1
 
 
+def test_unable_to_read_source(stdin, stdout, argv):
+    argv.extend([
+        'space_tracer',
+        '--traced', 'zipped_example',
+        CALLS_ZIPPED_PATH])
+    expected_report = f"""\
+Cannot read Python source from {ZIPPED_EXAMPLE_PATH/'zipped_example.py'}.
+"""
+    stdin.read.return_value = ""
+
+    with pytest.raises(SystemExit) as ctx:
+        sys.path.append(str(ZIPPED_EXAMPLE_PATH))
+        try:
+            main()
+        finally:
+            sys.path.pop()
+
+    assert stdout.getvalue() == expected_report
+    assert ctx.value.code == 1
+
+
 def test_exit_return_code(stdin, stdout, argv):
     argv.extend([
         'dummy.py',
@@ -891,19 +1039,26 @@ IndentationError: expected an indented block after function definition on line 1
     assert expected_report == stdout.getvalue()
 
 
-def test_driver_syntax_error(stdin, stdout, argv):
+def test_driver_syntax_error(stdin, stdout, argv, tmp_path):
+    driver_path = tmp_path / "driver.py"
+    driver_path.write_text(dedent("""\
+        # This source file triggers a syntax error.
+        
+        
+        for
+        """))
     argv.extend([
         'dummy.py',
         '--source_width', '0',
         '--traced_file', EXAMPLE_SOURCE_PATH,
         '--traced', 'example_source',
-        EXAMPLE_DRIVER_SYNTAX_ERROR_PATH])
-    source = """\
-x = 'Hello, World!'
-"""
-    expected_report = """\
-{} line 4: SyntaxError: invalid syntax
-""".format(EXAMPLE_DRIVER_SYNTAX_ERROR_PATH)
+        str(driver_path)])
+    source = dedent("""\
+        x = 'Hello, World!'
+        """)
+    expected_report = dedent("""\
+        {} line 4: SyntaxError: invalid syntax
+        """.format(driver_path))
     stdin.read.return_value = source
 
     with pytest.raises(SystemExit):
@@ -991,6 +1146,52 @@ print(40+2) | print('42')"""
     assert report == expected_report
 
 
+def test_main_indentation_error_stdin(stdin):
+    stdin.read.return_value = """\
+x = 1
+for y in range(10):
+z = 2
+"""
+    expected_report = """\
+x = 1               |
+for y in range(10): |
+z = 2               | IndentationError: expected an indented block"""
+    if sys.version_info >= (3, 10):
+        expected_report += " after 'for' statement on line 2"
+
+    report = TraceRunner().trace_command(['space_tracer', '-'])
+
+    assert report == expected_report
+
+
+def test_main_indentation_error(tmp_path):
+    source_path = tmp_path / "example.py"
+    source_path.write_text("""\
+x = 1
+for y in range(10):
+z = 2
+""")
+    expected_report = """\
+x = 1               |
+for y in range(10): |
+z = 2               | IndentationError: expected an indented block"""
+    if sys.version_info >= (3, 10):
+        expected_report += " after 'for' statement on line 2"
+
+    report = TraceRunner().trace_command(['space_tracer', str(source_path)])
+
+    assert report == expected_report
+
+
+def test_main_empty(stdin):
+    stdin.read.return_value = ""
+    expected_report = ""
+
+    report = TraceRunner().trace_command(['space_tracer', '-'])
+
+    assert report == expected_report
+
+
 def test_traced_file_without_traced():
     code = '''\
 def foo(n):
@@ -1018,15 +1219,7 @@ def foo(n):
     expected_report = '''\
 --------------------------------------------------------------------------- |
 example_driver.py doesn't call example_printing.py. Try a different driver. |
---------------------------------------------------------------------------- |
-
-
-
-
-
-
-
-'''
+--------------------------------------------------------------------------- |'''
 
     with replace_input(code):
         report = TraceRunner().trace_command([
@@ -1057,6 +1250,13 @@ sys = None
 
 x = 42
 return 62'''
+    if (3, 12, 0) <= sys.version_info:
+        replacement = "'sys' is not defined. Did you forget to import 'sys'"
+        if (3, 13, 0) <= sys.version_info:
+            replacement += '?'
+        expected_report = expected_report.replace(
+            "'sys' is not defined",
+            replacement)
 
     with replace_input(code):
         report = TraceRunner().trace_command([
@@ -1113,7 +1313,7 @@ t.forward(x)
 x = 100
 """
 
-    report, stdout = analyze(code)
+    report, stdout = analyze_live_python(code)
 
     assert report == expected_report
     assert stdout == ''
@@ -1138,12 +1338,38 @@ create_line
     pensize=1
 end_canvas
 .
-
-
-x = 100
 """
 
-    report, stdout = analyze(code, canvas_size)
+    report, stdout = analyze_live_python(code, canvas_size)
+
+    assert report == expected_report
+    assert stdout == ''
+
+
+def test_long_sig():
+    code = """\
+import typing
+
+
+def nok() -> typing.Tuple[
+        int]:
+    pass
+
+
+x = 1
+"""
+    expected_report = """\
+
+
+
+
+
+
+
+
+x = 1"""
+
+    report, stdout = analyze_live_python(code)
 
     assert report == expected_report
     assert stdout == ''

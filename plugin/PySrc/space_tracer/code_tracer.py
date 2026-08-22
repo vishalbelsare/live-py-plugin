@@ -1,22 +1,23 @@
 from ast import (arg, fix_missing_locations, iter_fields, Add, Assign,
-                 AST, Attribute, BitAnd, BitOr, BitXor, Call, Div, Ellipsis,
+                 AST, Attribute, BitAnd, BitOr, BitXor, Call, Div,
                  ExceptHandler, Expr, ExtSlice, FloorDiv, ImportFrom, Index,
-                 List, Load, LShift, Mod, Mult, Name, NodeTransformer, Num,
-                 Pow, Raise, Return, RShift, Slice, Starred, Store, Str, Sub,
+                 List, Load, LShift, Mod, Mult, Name, NodeTransformer,
+                 Pow, Raise, Return, RShift, Slice, Starred, Store, Sub,
                  Subscript, Try, Tuple, Yield)
 from copy import deepcopy
+from ast import FormattedValue, Constant
+import sys
 
 try:
-    from ast import FormattedValue, Constant
-except ImportError:
-    # Not available in Python 3.5
-    FormattedValue = Constant = None
-
-try:
-    from ast import MatchAs, MatchSequence, MatchStar
+    from ast import MatchAs, MatchSequence, MatchStar  # type: ignore
 except ImportError:
     # Not available before Python 3.10
-    MatchAs = MatchSequence = MatchStar = None
+    MatchAs = MatchSequence = MatchStar = None  # type: ignore
+
+if sys.version_info < (3, 12):
+    from ast import Ellipsis
+else:
+    Ellipsis = None
 
 CONTEXT_NAME = '__live_coding_context__'
 RESULT_NAME = '__live_coding_result__'
@@ -41,7 +42,7 @@ def find_line_numbers(node, line_numbers):
     :param node: AST node to scan
     :param set line_numbers: all the line numbers will be added to it.
     """
-    if FormattedValue is not None and isinstance(node, FormattedValue):
+    if isinstance(node, FormattedValue):
         # FormattedValue is a separate code block with its own line nums.
         return
 
@@ -141,7 +142,7 @@ class Tracer(NodeTransformer):
                 [index_node])
         return self._create_bare_context_call(
             'get_assignment_index',
-            [Num(n=index_to_get)])
+            [Constant(index_to_get)])
 
     def _wrap_slice(self, subscript_node, index_to_get=None):
         """ Wrap a slice in calls to assignment index methods.
@@ -186,23 +187,25 @@ class Tracer(NodeTransformer):
         elif isinstance(slice_node, Tuple):
             # Python 3.9 replaced ExtSlice with a Tuple.
             index_to_get = None
-            subscripts = [Subscript(slice=element)
+            subscripts = [Subscript(value=subscript_node, slice=element)
                           for element in slice_node.elts]
             format_text = ', '.join(self._wrap_slice(subscript)[0]
                                     for subscript in subscripts)
             slice_node.elts = [subscript.slice for subscript in subscripts]
-        elif isinstance(slice_node, (Index, Ellipsis)):
-            if (isinstance(slice_node, Ellipsis) or
-                    isinstance(slice_node.value, Ellipsis)):
-                index_to_get = None
-                format_text = '...'
-            else:
-                slice_node.value = self._wrap_assignment_index(
-                    slice_node.value,
-                    index_to_get)
-                format_text = '{!r}'
-                if index_to_get is not None:
-                    index_to_get -= 1
+        elif (Ellipsis is not None and isinstance(slice_node, Index) and
+              isinstance(slice_node.value, Ellipsis)):
+            index_to_get = None
+            format_text = '...'
+        elif isinstance(slice_node, Constant) and slice_node.value is ...:
+            index_to_get = None
+            format_text = '...'
+        elif isinstance(slice_node, Index):
+            slice_node.value = self._wrap_assignment_index(
+                slice_node.value,
+                index_to_get)
+            format_text = '{!r}'
+            if index_to_get is not None:
+                index_to_get -= 1
         else:
             # Python 3.9 stopped wrapping many things in an Index object, so
             # subscript_node.slice could be a Constant, BinOp, UnaryOp, or Call.
@@ -240,9 +243,9 @@ class Tracer(NodeTransformer):
                 List(elts=[], ctx=Load()),
                 existing_node,
                 List(elts=[], ctx=Load()),
-                Num(n=existing_node.lineno)]
+                Constant(existing_node.lineno)]
         for name, node in comparisons:
-            args[0].elts.append(Str(s=name))  # name
+            args[0].elts.append(Constant(name))  # name
             args[1].elts.append(  # repr() before
                 self._create_bare_context_call('get_repr', [node]))
             args[3].elts.append(  # repr() after
@@ -264,7 +267,7 @@ class Tracer(NodeTransformer):
                 else:
                     target_name = getattr(target_value, 'id', None)
             if target_name is not None:
-                args = [Str(s=target_name), target.value, Num(n=target.lineno)]
+                args = [Constant(target_name), target.value, Constant(target.lineno)]
                 target.value = self._create_bare_context_call('record_delete',
                                                               args)
         return existing_node
@@ -295,9 +298,9 @@ class Tracer(NodeTransformer):
         if len(targets) == 1 and isinstance(targets[0], Name):
             existing_node.value = self._create_bare_context_call(
                 'assign',
-                [Str(s=targets[0].id),
+                [Constant(targets[0].id),
                  existing_node.value,
-                 Num(n=first_line_number)])
+                 Constant(first_line_number)])
             return existing_node
         new_nodes = []
         format_string = self._wrap_assignment_targets(targets)
@@ -305,9 +308,7 @@ class Tracer(NodeTransformer):
                 isinstance(targets[0], Tuple)):
             existing_node.value = Call(func=Name(id='tuple', ctx=Load()),
                                        args=[existing_node.value],
-                                       keywords=[],
-                                       starargs=None,
-                                       kwargs=None)
+                                       keywords=[])
         existing_node.value = self._create_bare_context_call(
             'set_assignment_value',
             [existing_node.value])
@@ -316,7 +317,7 @@ class Tracer(NodeTransformer):
         if format_string is not None:
             try_body.append(self._create_context_call(
                 'report_assignment',
-                [Str(s=format_string), Num(n=existing_node.lineno)]))
+                [Constant(format_string), Constant(existing_node.lineno)]))
         self._create_end_assignment(new_nodes,
                                     try_body,
                                     first_line_number,
@@ -360,7 +361,7 @@ class Tracer(NodeTransformer):
                 format_string += ' = {}'
             try_body.append(self._create_context_call(
                 'report_assignment',
-                [Str(s=format_string), Num(n=existing_node.lineno)]))
+                [Constant(format_string), Constant(existing_node.lineno)]))
         self._create_end_assignment(new_nodes,
                                     try_body,
                                     first_line_number,
@@ -409,8 +410,8 @@ class Tracer(NodeTransformer):
                 case.body.insert(0,
                                  self._create_context_call(
                                      'report_assignment',
-                                     [Str(s=format_string),
-                                      Num(n=case.pattern.lineno)]))
+                                     [Constant(format_string),
+                                      Constant(case.pattern.lineno)]))
         return new_nodes
 
     def visit_For(self, node):
@@ -423,8 +424,8 @@ class Tracer(NodeTransformer):
         for statement in new_node.body:
             find_line_numbers(statement, line_numbers)
         line_numbers.add(new_node.lineno)
-        args = [Num(n=min(line_numbers)),
-                Num(n=max(line_numbers))]
+        args = [Constant(min(line_numbers)),
+                Constant(max(line_numbers))]
         new_body = [self._create_context_call('start_block', args)]
         new_body.extend(self._trace_assignment_list(new_node.target))
         new_body.extend(new_node.body)
@@ -441,8 +442,8 @@ class Tracer(NodeTransformer):
         for statement in new_node.body:
             find_line_numbers(statement, line_numbers)
         line_numbers.add(new_node.lineno)
-        args = [Num(n=min(line_numbers)),
-                Num(n=max(line_numbers))]
+        args = [Constant(min(line_numbers)),
+                Constant(max(line_numbers))]
         new_body = [self._create_context_call('start_block', args)]
         new_body.extend(new_node.body)
         new_node.body = new_body
@@ -457,8 +458,8 @@ class Tracer(NodeTransformer):
         for statement in new_node.body:
             find_line_numbers(statement, line_numbers)
         line_numbers.add(new_node.lineno)
-        args = [Num(n=min(line_numbers)),
-                Num(n=max(line_numbers))]
+        args = [Constant(min(line_numbers)),
+                Constant(max(line_numbers))]
         new_node.body.insert(0,
                              self._create_context_call('start_block', args))
         return new_node
@@ -478,28 +479,26 @@ class Tracer(NodeTransformer):
         find_line_numbers(new_node, line_numbers)
         first_line_number = min(line_numbers)
         last_line_number = max(line_numbers)
-        args = [Num(n=first_line_number),
-                Num(n=last_line_number)]
+        args = [Constant(first_line_number),
+                Constant(last_line_number)]
         try_body = new_node.body
         globals_call = Call(func=Name(id='globals', ctx=Load()),
                             args=[],
-                            keywords=[],
-                            starargs=None,
-                            kwargs=None)
+                            keywords=[])
         global_context = Subscript(value=globals_call,
-                                   slice=Index(value=Str(s=CONTEXT_NAME)),
+                                   slice=Index(value=Constant(CONTEXT_NAME)),
                                    ctx=Load())
         start_frame_call = Call(func=Attribute(value=global_context,
                                                attr='start_frame',
                                                ctx=Load()),
                                 args=args,
-                                keywords=[],
-                                starargs=None,
-                                kwargs=None)
+                                keywords=[])
         context_assign = Assign(targets=[Name(id=CONTEXT_NAME, ctx=Store())],
                                 value=start_frame_call)
         new_node.body = [context_assign]
-        if isinstance(try_body[0], Expr) and isinstance(try_body[0].value, Str):
+        if (isinstance(try_body[0], Expr) and
+                isinstance(try_body[0].value, Constant) and
+                isinstance(try_body[0].value.value, str)):
             # Move docstring back to top of function.
             # noinspection PyUnresolvedReferences
             new_node.body.insert(0, try_body.pop(0))
@@ -537,7 +536,8 @@ class Tracer(NodeTransformer):
         if isinstance(statement, ImportFrom):
             return statement.module == '__future__'
         if isinstance(statement, Expr):
-            return isinstance(statement.value, Str)
+            return (isinstance(statement.value, Constant) and
+                    isinstance(statement.value.value, str))
         return False
 
     def visit_Module(self, node):
@@ -575,8 +575,8 @@ class Tracer(NodeTransformer):
 
         arg_names = (getattr(old_arg, 'id', getattr(old_arg, 'arg', None))
                      for old_arg in new_node.args.args)
-        new_args = [Num(n=min(line_numbers)),
-                    Num(n=max(line_numbers))]
+        new_args = [Constant(min(line_numbers)),
+                    Constant(max(line_numbers))]
         new_args.extend(Name(id=name, ctx=Load())
                         for name in arg_names)
         new_args.append(new_node.body)
@@ -595,7 +595,7 @@ class Tracer(NodeTransformer):
                        value=value),
                 self._create_context_call('return_value',
                                           [Name(id=RESULT_NAME, ctx=Load()),
-                                           Num(n=existing_node.lineno)]),
+                                           Constant(existing_node.lineno)]),
                 Return(value=Name(id=RESULT_NAME, ctx=Load()))]
 
     def visit_TryExcept(self, node):
@@ -605,9 +605,9 @@ class Tracer(NodeTransformer):
             if handler_name is not None:
                 handler.body.insert(0, self._create_context_call(
                     'assign',
-                    [Str(s=handler_name),
+                    [Constant(handler_name),
                      Name(id=handler_name, ctx=Load()),
-                     Num(n=handler.lineno)]))
+                     Constant(handler.lineno)]))
             handler.body.insert(0, self._create_context_call('exception'))
         return existing_node
 
@@ -625,28 +625,25 @@ class Tracer(NodeTransformer):
 
             new_nodes.insert(0, self._create_context_call(
                 'exception',
-                [Num(n=existing_node.lineno)]))
+                [Constant(existing_node.lineno)]))
         return new_nodes
 
     def visit_Yield(self, node):
         existing_node = self.generic_visit(node)
         value = existing_node.value
         if value is None:
-            if Constant is None:
-                value = Name(id='None', ctx=Load())
-            else:
-                value = Constant(value=None)
+            value = Constant(value=None)
 
         return Yield(value=self._create_bare_context_call(
                     'yield_value',
-                    [value, Num(n=existing_node.lineno)]))
+                    [value, Constant(existing_node.lineno)]))
 
     def visit_YieldFrom(self, node):
         existing_node = self.generic_visit(node)
         value = existing_node.value
         existing_node.value = self._create_bare_context_call(
             'yield_from',
-            [value, Num(n=existing_node.lineno)])
+            [value, Constant(existing_node.lineno)])
         return existing_node
 
     def _trace_assignment_list(self, targets):
@@ -678,16 +675,16 @@ class Tracer(NodeTransformer):
         # name, value, line number
         if isinstance(target, Name):
             arg_name = target.id
-        elif arg and isinstance(target, arg):
+        elif isinstance(target, arg):
             arg_name = target.arg
         elif isinstance(target, Starred):
             arg_name = target.value.id
         elif isinstance(target, Attribute):
-            args = [Str(s='{}.{}'.format(target.value.id, target.attr)),
+            args = [Constant('{}.{}'.format(target.value.id, target.attr)),
                     Attribute(value=Name(id=target.value.id, ctx=Load()),
                               attr=target.attr,
                               ctx=Load()),
-                    Num(n=lineno)]
+                    Constant(lineno)]
             return self._create_context_call('assign', args)
         elif isinstance(target, str):
             arg_name = target
@@ -695,9 +692,9 @@ class Tracer(NodeTransformer):
             message = 'Cannot trace assignment to a {}.'.format(type(target))
             raise TypeError(message)
 
-        args = [Str(s=arg_name),
+        args = [Constant(arg_name),
                 Name(id=arg_name, ctx=Load()),
-                Num(n=lineno)]
+                Constant(lineno)]
         return self._create_context_call('assign', args)
 
     def _wrap_assignment_target(self, target, index_to_get=None):
@@ -771,9 +768,7 @@ class Tracer(NodeTransformer):
                          ctx=Load())
         return Call(func=func,
                     args=args,
-                    keywords=[],
-                    starargs=None,
-                    kwargs=None)
+                    keywords=[])
 
 
 class LineNumberCleaner(NodeTransformer):
@@ -787,6 +782,11 @@ class LineNumberCleaner(NodeTransformer):
                 node.lineno = self.max_line
             else:
                 self.max_line = lineno
+            if getattr(node, 'end_lineno', lineno) < node.lineno:
+                node.end_lineno = node.lineno
+            col_offset = getattr(node, 'col_offset', 0)
+            if getattr(node, 'end_col_offset', 1_000_000) < col_offset:
+                node.end_col_offset = col_offset
         return self.generic_visit(node)
 
 

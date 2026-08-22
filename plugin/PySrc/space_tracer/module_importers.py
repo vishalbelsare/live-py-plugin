@@ -1,5 +1,6 @@
 from ast import parse
 import builtins
+from functools import partial
 from importlib.abc import MetaPathFinder, Loader
 from importlib.machinery import ModuleSpec
 from importlib.util import find_spec
@@ -15,9 +16,14 @@ from .traced_finder import DEFAULT_MODULE_NAME, LIVE_MODULE_NAME, \
 
 try:
     from .mock_turtle import MockTurtle
-    from .live_image import LiveFigure, monkey_patch_pyglet
+    from .live_image import LiveFigure, LivePillowImage, monkey_patch_pyglet
 except ImportError:
-    MockTurtle = monkey_patch_pyglet = LiveFigure = None
+    MockTurtle = monkey_patch_pyglet = None  # type: ignore
+    LiveFigure = LivePillowImage = None  # type: ignore
+
+
+class SourceLoadError(IOError):
+    pass
 
 
 class DelegatingModuleFinder(MetaPathFinder):
@@ -111,6 +117,8 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
                                                            path,
                                                            target)
         if spec is not None:
+            if spec.origin is None:
+                return None
             if spec.origin == self.traced_file:
                 self.record_module(fullname)
                 return ModuleSpec(fullname, self, origin=self.traced_file)
@@ -150,14 +158,24 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
                     self.source_code = source_file.read()
             source_code = self.source_code
         else:
-            with open(module_file) as source_file:
-                source_code = source_file.read()
+            try:
+                with open(module_file) as source_file:
+                    source_code = source_file.read()
+            except Exception as ex:
+                message = f'Cannot read Python source from {module_file}.'
+                raise SourceLoadError(message) from ex
         module_name = module.__name__
         is_module_traced = False
         source_tree = None
         if self.traced == module_name:
             is_module_traced = True
-            self.source_finder = TracedFinder(source_code, '', parsed_filename)
+            self.is_traced_module_imported = True
+            self.source_finder = TracedFinder(source_code,
+                                              '',
+                                              parsed_filename,
+                                              parse=False)
+            self.source_finder.parse()
+            self.source_finder.is_tracing = True
         else:
             if self.traced.startswith(module_name):
                 traced_child = self.traced[len(module_name)+1:]
@@ -166,14 +184,17 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
             else:
                 traced_child = None
             if traced_child:
-                source_finder = TracedFinder(source_code,
-                                             traced_child,
-                                             parsed_filename)
-                source_tree = source_finder.source_tree
-                if source_finder.traced_node is not None:
+                self.source_finder = TracedFinder(source_code,
+                                                  traced_child,
+                                                  parsed_filename,
+                                                  parse=False)
+                self.source_finder.parse()
+                source_tree = self.source_finder.source_tree
+                if self.source_finder.traced_node is not None:
                     is_module_traced = True
-                    self.source_finder = source_finder
+                    self.is_traced_module_imported = True
                 else:
+                    self.source_finder = None
                     original_loader = self.original_loaders.get(module.__name__)
                     if original_loader is not None:
                         module_spec.loader = original_loader
@@ -183,7 +204,6 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
             source_tree = parse(source_code, parsed_filename)
         if is_module_traced:
             source_tree = trace_source_tree(source_tree)
-            self.is_traced_module_imported = True
         if (module_name in (DEFAULT_MODULE_NAME, LIVE_MODULE_NAME) and
                 self.driver_module):
             target_module = self.driver_module
@@ -322,17 +342,25 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
             elif traced.startswith(LIVE_MODULE_NAME):
                 traced = traced[len(LIVE_MODULE_NAME)+1:]
                 self.is_traced_module_imported = True
+            if self.is_traced_module_imported and self.source_code is None:
+                self.source_code = source
             parsed_file = PSEUDO_FILENAME if traced == '' else filename
             self.driver_finder = TracedFinder(source,
                                               traced,
-                                              parsed_file)
+                                              parsed_file,
+                                              parse=False)
+            self.driver_finder.parse()
             to_compile = self.driver_finder.source_tree
             if (traced == '' or
                     self.driver_finder.traced_node is not None):
                 to_compile = trace_source_tree(to_compile)
                 self.driver_finder.is_tracing = True
         else:
-            self.driver_finder = TracedFinder(source, '', PSEUDO_FILENAME)
+            self.driver_finder = TracedFinder(source,
+                                              '',
+                                              PSEUDO_FILENAME,
+                                              parse=False)
+            self.driver_finder.parse()
             to_compile = self.driver_finder.source_tree
         code = compile(to_compile, filename or PSEUDO_FILENAME, "exec")
 
@@ -342,6 +370,7 @@ class TracedModuleImporter(DelegatingModuleFinder, Loader):
         if self.traced in (DEFAULT_MODULE_NAME, LIVE_MODULE_NAME):
             # Error is already visible, no extra display needed.
             return
+        self.report_builder.end_time = None  # Avoid extra timeout errors.
         messages = list(split_lines(messages))
         block_size = len(messages) + 2
         self.report_builder.start_block(1, block_size)
@@ -374,7 +403,8 @@ class PatchedModuleFinder(DelegatingModuleFinder):
                             'matplotlib.pyplot',
                             'numpy.random',
                             'random',
-                            'pyglet'):
+                            'pyglet',
+                            'PIL.ImageShow'):
             return None
         spec = super(PatchedModuleFinder, self).find_spec(fullname, path, target)
         if spec is not None:
@@ -403,27 +433,47 @@ class PatchedModuleLoader(Loader):
             module.use('Agg')
         elif self.fullname == 'matplotlib.pyplot':
             self.plt = module
-            # noinspection PyProtectedMember
-            turtle_screen = MockTurtle._screen
-            screen_width = turtle_screen.cv.cget('width')
-            screen_height = turtle_screen.cv.cget('height')
-            module.show = self.mock_show
-            module.live_coding_size = (screen_width, screen_height)
-            module.live_coding_zoom = self.live_coding_zoom
+            module.show = partial(self.mock_show_matplotlib)  # Lets it accept a signature.
+            module.live_coding_size = self._screen_size()
+            module.live_coding_zoom = self.live_coding_zoom_matplotlib
             if self.is_zoomed:
-                self.live_coding_zoom()
+                self.live_coding_zoom_matplotlib()
         elif self.fullname == 'pyglet':
             # noinspection PyProtectedMember
             monkey_patch_pyglet(MockTurtle._screen.cv)
+        elif self.fullname == 'PIL.ImageShow':
+            module.show = partial(self.mock_show_pillow)
 
-    def mock_show(self, *_args, **_kwargs):
+    # noinspection PyUnusedLocal
+    def mock_show_pillow(self, image, title=None, **options):
+        position = self._center_position(*image.size)
+        LivePillowImage(image).display(position)
+
+    def mock_show_matplotlib(self, *_args, **_kwargs):
         figure = self.plt.gcf()
+        figure_width = figure.get_figwidth() * figure.dpi
+        figure_height = figure.get_figheight() * figure.dpi
+        position = self._center_position(figure_width, figure_height)
+        LiveFigure(figure).display(position)
+
+    def live_coding_zoom_matplotlib(self):
+        screen_width, screen_height = self.plt.live_coding_size
+        fig = self.plt.gcf()
+        fig_width, fig_height = fig.get_figwidth(), fig.get_figheight()
+        x_dpi = screen_width/fig_width
+        y_dpi = screen_height/fig_height
+        fig.dpi = min(x_dpi, y_dpi)
+
+    @staticmethod
+    def _screen_size():
         # noinspection PyProtectedMember
         turtle_screen = MockTurtle._screen
         screen_width = turtle_screen.cv.cget('width')
         screen_height = turtle_screen.cv.cget('height')
-        figure_width = figure.get_figwidth()*figure.dpi
-        figure_height = figure.get_figheight()*figure.dpi
+        return screen_width, screen_height
+
+    def _center_position(self, figure_width, figure_height):
+        screen_width, screen_height = self._screen_size()
         if figure_width < screen_width:
             x = (screen_width - figure_width) // 2
         else:
@@ -436,13 +486,4 @@ class PatchedModuleLoader(Loader):
         # Adjust to turtle coordinates.
         x -= screen_width // 2
         y = screen_height // 2 - y
-
-        LiveFigure(figure).display((x, y))
-
-    def live_coding_zoom(self):
-        screen_width, screen_height = self.plt.live_coding_size
-        fig = self.plt.gcf()
-        fig_width, fig_height = fig.get_figwidth(), fig.get_figheight()
-        x_dpi = screen_width/fig_width
-        y_dpi = screen_height/fig_height
-        fig.dpi = min(x_dpi, y_dpi)
+        return x, y

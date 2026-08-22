@@ -1,9 +1,10 @@
 from base64 import standard_b64decode
 import binascii
-from collections import namedtuple
+import os
 import re
 import struct
 import sys
+import traceback
 import types
 import typing
 
@@ -11,17 +12,31 @@ from .canvas import Canvas
 
 try:
     import tkinter as tk
+    has_tk = True
 except ImportError:
+    has_tk = False
     tkinter_name = 'tkinter'
     tk = sys.modules[tkinter_name] = types.ModuleType(tkinter_name)
 
-    tk.Frame = tk.Canvas = tk.Tk = object
+    tk.Frame = tk.Canvas = tk.Tk = tk.ROUND = object  # type: ignore
+
+    class TkMisc:
+        pass
+
+    tk.Misc = TkMisc()  # type: ignore
+
+    class TclError(Exception):
+        pass
+
+    tk.TclError = TclError  # type: ignore
     tk.mainloop = lambda *args, **kwargs: None
+    tk.Misc.mainloop = lambda *args, **kwargs: None  # type: ignore
 
     dialog_name = tkinter_name + '.simpledialog'
-    tk.simpledialog = sys.modules[dialog_name] = types.ModuleType(dialog_name)
+    tk.simpledialog = types.ModuleType(dialog_name)  # type: ignore
+    sys.modules[dialog_name] = tk.simpledialog  # type: ignore
 
-from turtle import TNavigator, TPen
+from turtle import RawTurtle, TurtleScreen, TurtleGraphicsError
 
 DEFAULT_FONT = ("Arial", 8, "normal")
 
@@ -29,42 +44,105 @@ DEFAULT_FONT = ("Arial", 8, "normal")
 # noinspection DuplicatedCode
 # noinspection PyProtectedMember
 # noinspection PyUnresolvedReferences
-class MockTurtle(TNavigator, TPen):
-    class _Screen(object):
+class MockTurtle(RawTurtle):
+    class _Screen(TurtleScreen):
         def __init__(self, canvas):
             if canvas is None:
                 canvas = Canvas()
-            self.cv = canvas
-            self.xscale = self.yscale = 1
+            super().__init__(canvas)
             self._config = {'bgcolor': None}
 
-        def window_width(self):
-            return self.cv.cget('width')
+        def _blankimage(self):
+            if has_tk:
+                return super()._blankimage()
+            return None
 
-        def window_height(self):
-            return self.cv.cget('height')
+        @staticmethod
+        def _rgb_value(rgbstr):
+            return round(int(rgbstr, 16)/2.55)/100.0
 
-        def screensize(self, canvwidth=None, canvheight=None, bg=None):
-            if canvwidth is canvheight is bg is None:
-                return self.window_width(), self.window_height()
-        
-        def bgcolor(self, color=None):
-            if color is None:
-                bgcolor = self._config['bgcolor']
-                if bgcolor is None:
-                    return 'white'
-                return bgcolor
-            self._config['bgcolor'] = color
+        # noinspection DuplicatedCode
+        def _color(self, colorstr):
+            """ Reverse lookup of _colorstr. """
+            if not colorstr.startswith('#'):
+                return colorstr
+            if colorstr == '#ffffff':
+                return 'white'
+            itercolors = getattr(color_map, 'iteritems', color_map.items)
+            for name, code in itercolors():
+                if code == colorstr:
+                    return name
+            return tuple(self._rgb_value(colorstr[2*i+1:2*i+3]) for i in range(3))
 
-        def tracer(self, a=None, b=None):
+        # noinspection PyMethodMayBeStatic,DuplicatedCode
+        def _colorstr(self, color):
+            """Return color string corresponding to args.
+
+            Argument may be a string or a tuple of three
+            numbers corresponding to actual colormode,
+            i.e. in the range 0<=n<=colormode.
+
+            If the argument doesn't represent a color,
+            just uses black.
+            """
+            if len(color) == 1:
+                color = color[0]
+            if color == 'black':
+                return color
+            if isinstance(color, str):
+                if re.match(r'^#[0-9A-Fa-f]{6}$', color):
+                    return color.lower()
+                rgb = color_map.get(color.lower())
+                if rgb is None:
+                    raise TurtleGraphicsError('bad color string: {}'.format(
+                        color))
+                return rgb
+            try:
+                r, g, b = color
+            except (TypeError, ValueError):
+                raise TurtleGraphicsError("bad color arguments: %s" % str(color))
+            # noinspection PyUnresolvedReferences
+            colormode = self._colormode
+            r, g, b = [round(255.0*x/colormode) for x in (r, g, b)]
+            if not ((0 <= r <= 255) and (0 <= g <= 255) and (0 <= b <= 255)):
+                raise TurtleGraphicsError('bad color sequence: {!r}'.format(
+                    color))
+            return "#%02x%02x%02x" % (r, g, b)
+
+        def clear(self):
+            is_patched = MockTurtle.is_patched()
+            super().clear()
+            if is_patched:
+                MockTurtle._pen = MockTurtle()
+
+        def clearscreen(self):
+            self.clear()
+
+        def title(self, title):
             pass
 
-        def update(self):
+        def setup(self, width=None, height=None, startx=None, starty=None):
             pass
 
-    _Stamp = namedtuple('Stamp', 'pos heading color')
-    _screen = _pen = OriginalTurtle = original_mainloop = None
-    instances = []
+        def textinput(self, title, prompt):
+            pass
+
+        def numinput(self, title, prompt, default=None, minval=None, maxval=None):
+            pass
+
+        def mainloop(self):
+            pass
+
+        def done(self):
+            pass
+
+        def bye(self):
+            pass
+
+        def exitonclick(self):
+            pass
+
+    _screen = _pen = OriginalTurtle = None
 
     @classmethod
     def monkey_patch(cls, canvas=None):
@@ -73,8 +151,6 @@ class MockTurtle(TNavigator, TPen):
         turtle_module = sys.modules['turtle']
         cls.OriginalTurtle = turtle_module.Turtle
         turtle_module.Turtle = MockTurtle
-        cls.original_mainloop = turtle_module.mainloop
-        turtle_module.mainloop = turtle_module.done = lambda: None
         # noinspection PyProtectedMember
         MockTurtle._screen = MockTurtle._Screen(canvas)
         MockTurtle._pen = MockTurtle()
@@ -83,13 +159,15 @@ class MockTurtle(TNavigator, TPen):
     def remove_monkey_patch(cls):
         if not cls.is_patched():
             raise RuntimeError('MockTurtle is not monkey patched.')
-        MockTurtle.instances = []
         if cls.OriginalTurtle is not None:
             turtle_module = sys.modules['turtle']
             turtle_module.Turtle = cls.OriginalTurtle
-            turtle_module.mainloop = turtle_module.done = cls.original_mainloop
-            MockTurtle._pen = cls.OriginalTurtle = cls.original_mainloop = None
+            MockTurtle._pen = cls.OriginalTurtle = None
             MockTurtle._screen = None
+            MockTurtle.screens[:] = [
+                screen
+                for screen in MockTurtle.screens
+                if not isinstance(screen, MockTurtle._Screen)]
 
     @classmethod
     def is_patched(cls):
@@ -97,12 +175,14 @@ class MockTurtle(TNavigator, TPen):
 
     @classmethod
     def get_all_reports(cls):
-        return MockTurtle._pen.report
+        if cls._pen is None:
+            return []
+        return cls._pen.report
 
     @classmethod
     def display_image(cls,
                       image: str,
-                      position: typing.Tuple[int, int] = None,
+                      position: typing.Optional[typing.Tuple[float, float]] = None,
                       align: str = 'topleft'):
         """ Display an image on the mock turtle's canvas.
 
@@ -116,11 +196,12 @@ class MockTurtle(TNavigator, TPen):
         if not cls.is_patched():
             return
         screen = cls._screen
+        assert screen is not None
         t = cls._pen
         if position is None or t is None:
             x = y = 0
         else:
-            x, y = t._convert_position(position)
+            x, y = position
 
         if align != 'topleft':
             error_message = 'Invalid image: {0}...'.format(image[:10])
@@ -148,28 +229,22 @@ class MockTurtle(TNavigator, TPen):
             elif align_match.group(2) in ('center', None):
                 x -= width // 2
 
-        screen.cv.create_image(x, y, image=image)
+        screen.cv.create_image(x, -y, image=image)
 
     def __init__(self, x=0, y=0, heading=0, canvas=None):
-        self._path = None
-        self._lines_to_draw = []
-        TNavigator.__init__(self)
-        TPen.__init__(self)
         if MockTurtle._screen is not None:
-            self.screen = MockTurtle._screen
+            screen = MockTurtle._screen
         else:
             # noinspection PyProtectedMember
-            self.screen = MockTurtle._Screen(canvas)
-        self.stamps = []
-        self.__xoff = self.screen.cv.cget('width')/2
-        self.__yoff = self.screen.cv.cget('height')/2
+            screen = MockTurtle._Screen(canvas)
+        super().__init__(screen)
         if x or y:
             self.up()
             self.setx(x)
             self.sety(y)
             self.down()
         self.setheading(heading)
-        MockTurtle.instances.append(self)
+        super().speed(0)
 
     def __repr__(self):
         x = round(self.xcor())
@@ -177,67 +252,12 @@ class MockTurtle(TNavigator, TPen):
         h = round(self.heading())
         return 'MockTurtle(%d, %d, %d)' % (x, y, h)
 
-    def _convert_position(self, position):
-        x, y = position
-        return (x*self.screen.xscale + self.__xoff,
-                -y*self.screen.yscale + self.__yoff)
-
-    def _goto(self, end):
-        xstart, ystart = self._convert_position(self._position)
-        xend, yend = self._convert_position(end)
-        kwargs = {}
-        if self._pencolor:
-            kwargs['fill'] = self._pencolor
-        if self._pensize:
-            kwargs['pensize'] = self._pensize
-        if self._drawing:
-            args = [xstart, ystart, xend, yend]
-            if self._path:
-                self._lines_to_draw.append((args, kwargs))
-            else:
-                self.screen.cv.create_line(*args, **kwargs)
-        if self._path:
-            self._path.append(xend)
-            self._path.append(yend)
-        self._position = end
-
-    def reset(self):
-        TNavigator.reset(self)
-        # noinspection PyUnresolvedReferences,PyProtectedMember
-        TPen._reset(self)
-        self.screen.cv.report.clear()
-
-    def dot(self, size=None, *color):
-        x, y = self._position
-        if size is not None:
-            diameter = size
-        else:
-            pensize = self._pensize or 0
-            diameter = max(pensize+4, 2*pensize)
-        if len(color):
-            pencolor = self._colorstr(color)
-        else:
-            pencolor = self._pencolor or 0
-        r = diameter / 2
-        t2 = self.__class__(canvas=self.screen.cv)
-        t2.up()
-        t2.goto(x, y - r)
-        t2.fillcolor(pencolor)
-        t2.begin_fill()
-        t2.circle(r)
-        t2.end_fill()
-
     # noinspection PyProtectedMember
     def __getattr__(self, name):
         if name == 'report':
-            for instance in MockTurtle.instances:
-                instance._path = None  # Cancel incomplete fill.
-                instance._newLine()
-                instance._flush_lines()
-                instance._draw_stamps()
-            report = self.screen.cv.report[:]
-            bgcolor = self.screen._config['bgcolor']
-            if bgcolor is not None:
+            report = self.screen.cv.build_report()
+            bgcolor = self.screen.bgcolor()
+            if bgcolor is not None and bgcolor != 'white':
                 # noinspection PyTypeChecker
                 bgcolorstr = self._colorstr(bgcolor)
                 report[:0] = ["bgcolor",
@@ -247,74 +267,17 @@ class MockTurtle(TNavigator, TPen):
         raise AttributeError(
             "'MockTurtle' object has no attribute {!r}".format(name))
 
-    def _draw_stamps(self):
-        if not self.stamps:
-            return
+    def pen(self, pen=None, **pendict):
+        if not (pen or pendict):
+            return super().pen()
 
-        start_pos = self.pos()
-        start_heading = self.heading()
-        start_pensize = self.pensize()
-        start_isdown = self.isdown()
-        self.pensize(1)
-        stamps = self.stamps[:]
-        self.stamps.clear()
-        for stamp in stamps:
-            self.up()
-            self.goto(stamp.pos)
-            self.setheading(stamp.heading)
-            self.color(*stamp.color)
-            self.down()
-            self.begin_fill()
-            self.left(151)
-            self.fd(10.296)
-            self.left(140.8)
-            self.fd(5.385)
-            self.right(43.6)
-            self.fd(5.385)
-            self.setpos(stamp.pos)
-            self.end_fill()
-        self.up()
-        self.goto(start_pos)
-        self.setheading(start_heading)
-        self.pensize(start_pensize)
-        if start_isdown:
-            self.down()
-
-    def getscreen(self):
-        return self.screen
-
-    def begin_fill(self):
-        self.fill(True)
-
-    def end_fill(self):
-        self.fill(False)
-
-    def _flush_lines(self):
-        for args, kwargs in self._lines_to_draw:
-            self.screen.cv.create_line(*args, **kwargs)
-
-        self._lines_to_draw = []
-        self._draw_stamps()
-
-    def fill(self, flag=None):
-        if flag is None:
-            return self._path is not None
-        if self._path and len(self._path) > 2:
-            self.screen.cv.create_polygon(*self._path,
-                                          fill=self._fillcolor,
-                                          outline='')
-
-        self._path = None  # Clear to avoid interfering with stamps.
-        self._flush_lines()
-        if flag:
-            x, y = self._convert_position(self._position)
-            self._path = [x, y]
-
-    def stamp(self):
-        self.stamps.append(
-            MockTurtle._Stamp(self.pos(), self.heading(), self.color()))
-        if not self.fill():
-            self._draw_stamps()
+        if isinstance(pen, dict):
+            p = dict(pen)
+        else:
+            p = {}
+        p.update(pendict)
+        p['speed'] = 0
+        return super().pen(p)
 
     def write(self,
               arg,
@@ -323,13 +286,6 @@ class MockTurtle(TNavigator, TPen):
               font=DEFAULT_FONT):
         if move:
             raise NotImplementedError('move parameter is not supported.')
-        if align == 'left':
-            anchor = 'sw'
-        elif align == 'center':
-            anchor = 's'
-        else:
-            assert align == 'right'
-            anchor = 'se'
 
         # noinspection PyBroadException
         try:
@@ -343,58 +299,54 @@ class MockTurtle(TNavigator, TPen):
         font[1] = int(font[1])
         font = tuple(font)
 
-        kwargs = dict(text=str(arg),
-                      anchor=anchor,
-                      font=font)
-        if self._pencolor:
-            kwargs['fill'] = self._pencolor
-        x, y = self._convert_position(self._position)
-        self.screen.cv.create_text(x, y, **kwargs)
+        super().write(arg, move, align, font)
 
     def _update(self, *args, **kwargs):
-        if not self._pencolor.startswith('#'):
+        if not self._pencolor.startswith('#') and self._pencolor != 'black':
             self._pencolor = self._colorstr(self._pencolor)
-        if not self._fillcolor.startswith('#'):
+        if not self._fillcolor.startswith('#') and self._fillcolor != 'black':
             self._fillcolor = self._colorstr(self._fillcolor)
-        return super(MockTurtle, self)._update(*args, **kwargs)
+        return super()._update(*args, **kwargs)
 
-    # noinspection PyMethodMayBeStatic
-    def _colorstr(self, color):
-        """Return color string corresponding to args.
+    def _drawturtle(self):
+        pass
 
-        Argument may be a string or a tuple of three
-        numbers corresponding to actual colormode,
-        i.e. in the range 0<=n<=colormode.
-
-        If the argument doesn't represent a color,
-        just uses black.
-        """
-        if len(color) == 1:
-            color = color[0]
-        if isinstance(color, str):
-            return color_map.get(color.lower(), color)
-        try:
-            r, g, b = color
-        except ValueError:
-            return '#000000'
-        r, g, b = [round(255.0*x) for x in (r, g, b)]
-        if not ((0 <= r <= 255) and (0 <= g <= 255) and (0 <= b <= 255)):
-            return '#000000'
-        return "#%02x%02x%02x" % (r, g, b)
-
-    @staticmethod
-    def _rgb_value(rgbstr):
-        return round(int(rgbstr, 16)/2.55)/100.0
-
-    def _color(self, colorstr):
-        """ Reverse lookup of _colorstr. """
-        if not colorstr.startswith('#'):
-            return colorstr
-        itercolors = getattr(color_map, 'iteritems', color_map.items)
-        for name, code in itercolors():
-            if code == colorstr:
-                return name
-        return tuple(self._rgb_value(colorstr[2*i+1:2*i+3]) for i in range(3))
+    def display_error(self):
+        tb = traceback.TracebackException(*sys.exc_info())
+        tb_stack = tb.stack
+        library_path = os.path.dirname(__file__)
+        while tb_stack and tb_stack[0].filename.startswith(library_path):
+            tb_stack.pop(0)
+        del tb_stack[10:]
+        message = ''.join(tb.format(chain=False))
+        message_lines = message.splitlines(keepends=False)
+        split_lines = []
+        for line in message_lines:
+            while line:
+                split_lines.append(line[:80])
+                line = line[80:]
+        max_length = max(len(line) for line in split_lines)
+        self.up()
+        screen = self.getscreen()
+        window_width = screen.window_width()
+        window_height = screen.window_height()
+        line_height = min(window_height / len(split_lines),
+                          window_width * 2 / max_length)
+        font_size = round(line_height * 0.75)
+        font = ('Arial', font_size, 'normal')
+        self.goto(-window_width // 2, window_height // 2)
+        self.setheading(-90)
+        self.fillcolor('white')
+        self.begin_fill()
+        for _ in range(2):
+            self.forward(line_height * len(split_lines))
+            self.left(90)
+            self.forward(window_width)
+            self.left(90)
+        self.end_fill()
+        for line in split_lines:
+            self.forward(line_height)
+            self.write(line, font=font)
 
 
 # Normally, Tkinter will look up these colour names for you, but we don't

@@ -16,9 +16,11 @@ import types
 
 try:
     # noinspection PyUnresolvedReferences
-    from js import document, window
+    from js import document, window  # type: ignore
     IS_PYODIDE = True
-    get_terminal_size = None
+
+    def get_terminal_size(_=None):
+        return 0, 0
 except ImportError:
     IS_PYODIDE = False
     document = window = None
@@ -27,11 +29,12 @@ except ImportError:
 try:
     from .mock_turtle import MockTurtle
 except ImportError:
-    MockTurtle = None
+    MockTurtle = None  # type: ignore
 
 from .canvas import Canvas
 from .code_tracer import CONTEXT_NAME, find_line_numbers
-from .module_importers import TracedModuleImporter, PatchedModuleFinder
+from .module_importers import TracedModuleImporter, PatchedModuleFinder, \
+    SourceLoadError
 from .report_builder import ReportBuilder
 from .traced_finder import DEFAULT_MODULE_NAME, LIVE_MODULE_NAME, \
     PSEUDO_FILENAME
@@ -44,15 +47,11 @@ def parse_args(command_args=None):
     if launcher.endswith("__main__.py"):
         executable = os.path.basename(sys.executable)
         launcher = executable + " -m " + __package__
-    if get_terminal_size is None:
-        terminal_width = 0
-    else:
-        terminal_width = 0
-        try:
-            if get_terminal_size is not None:
-                terminal_width, _ = get_terminal_size()
-        except OSError:
-            pass
+    terminal_width = 0
+    try:
+        terminal_width, _ = get_terminal_size()
+    except OSError:
+        pass
     # noinspection PyTypeChecker
     parser = argparse.ArgumentParser(
         launcher,
@@ -62,6 +61,13 @@ def parse_args(command_args=None):
                         '--canvas',
                         action='store_true',
                         help='Should canvas commands be printed?')
+    parser.add_argument('--canvas_only',
+                        action='store_true',
+                        help='Should canvas commands be printed without live display?')
+    parser.add_argument('--millisecond_limit',
+                        type=int,
+                        default=500,
+                        help='time limit in milliseconds, 0 to disable')
     parser.add_argument('-x',
                         '--width',
                         type=int,
@@ -141,8 +147,9 @@ def parse_args(command_args=None):
                         help='include line numbers with source code')
     parser.add_argument('--live',
                         action='store_true',
-                        help='load main module as %s instead of %s.' %
-                             (LIVE_MODULE_NAME, DEFAULT_MODULE_NAME))
+                        help=f'load main module as {LIVE_MODULE_NAME} instead '
+                             f'of {DEFAULT_MODULE_NAME} and show all source '
+                             f'code lines.')
     parser.add_argument('-m',
                         dest='is_module',
                         action='store_true',
@@ -152,6 +159,10 @@ def parse_args(command_args=None):
                         help='script to call traced code, plus any arguments. '
                              'Default: %(default)s to use --traced_file.')
     args = parser.parse_args(command_args[1:])
+    if args.canvas_only:
+        args.canvas = True
+    if args.millisecond_limit == 0:
+        args.millisecond_limit = None
     if args.driver:
         if args.driver[0] == '-m':
             args.is_module = True
@@ -184,7 +195,7 @@ def main():
         exit(return_code)
 
 
-def analyze(source_code, canvas_size=None):
+def analyze_live_python(source_code, canvas_size=None):
     """ Trace the source code for display in the browser.
 
     :param source_code: Source code to trace.
@@ -204,17 +215,20 @@ def analyze(source_code, canvas_size=None):
                        '--stderr', '!']
         if canvas_size is not None:
             canvas_width, canvas_height = canvas_size
-            tracer_args.append('--canvas')
+            tracer_args.append('--canvas_only')
             tracer_args.append('-x{}'.format(canvas_width))
             tracer_args.append('-y{}'.format(canvas_height))
+            tracer_args.append('--millisecond_limit=10000')
+            tracer_args.append('--zoomed')
         tracer_args.append(PSEUDO_FILENAME)
         code_report = tracer.trace_command(tracer_args)
+    # noinspection PyUnresolvedReferences
     stdout = tracer.standard_files.old_files['stderr'].getvalue()
     return code_report, stdout
 
 
 def web_main():
-    window.analyze = analyze
+    window.analyzeLivePython = analyze_live_python
 
 
 class StandardFiles(dict):
@@ -242,7 +256,7 @@ class StandardFiles(dict):
             file_key = (filename, mode)
             file = self.new_files.get(file_key)
             if file is None:
-                file = argparse.FileType(mode)(filename)
+                file = open(filename, mode)
                 self.new_files[file_key] = file
         super().__setitem__(key, file)
 
@@ -302,10 +316,11 @@ def swallow_output(standard_files: StandardFiles):
     # noinspection PyUnresolvedReferences
     old_string_io = io.StringIO
     try:
-        sys.stdout = FileSwallower(standard_files['stdout'])
-        sys.stderr = FileSwallower(standard_files['stderr'], target_name='sys.stderr')
+        sys.stdout = FileSwallower(standard_files['stdout'])  # type: ignore
+        sys.stderr = FileSwallower(standard_files['stderr'],  # type: ignore
+                                   target_name='sys.stderr')
         sys.stdin = standard_files['stdin']
-        io.StringIO = TracedStringIO
+        io.StringIO = TracedStringIO  # type: ignore
         yield
     finally:
         if old_main_mod is not None:
@@ -315,7 +330,7 @@ def swallow_output(standard_files: StandardFiles):
         sys.stdout = standard_files.old_files['stdout']
         sys.stderr = standard_files.old_files['stderr']
         sys.stdin = standard_files.old_files['stdin']
-        io.StringIO = old_string_io
+        io.StringIO = old_string_io  # type: ignore
 
 
 @contextmanager
@@ -331,42 +346,8 @@ def replace_input(stdin_text=None):
 def display_error_on_canvas():
     if MockTurtle is None:
         return
-    tb = traceback.TracebackException(*sys.exc_info())
-    tb_stack = tb.stack
-    library_path = os.path.dirname(__file__)
-    while tb_stack and tb_stack[0].filename.startswith(library_path):
-        tb_stack.pop(0)
-    del tb_stack[10:]
-    message = ''.join(tb.format(chain=False))
-    message_lines = message.splitlines(keepends=False)
-    split_lines = []
-    for line in message_lines:
-        while line:
-            split_lines.append(line[:80])
-            line = line[80:]
-    max_length = max(len(line) for line in split_lines)
     t = MockTurtle()
-    t.up()
-    screen = t.getscreen()
-    window_width = screen.window_width()
-    window_height = screen.window_height()
-    line_height = min(window_height / len(split_lines),
-                      window_width * 2 / max_length)
-    font_size = round(line_height * 0.75)
-    font = ('Arial', font_size, 'normal')
-    t.goto(-window_width // 2, window_height // 2)
-    t.setheading(-90)
-    t.fillcolor('white')
-    t.begin_fill()
-    for _ in range(2):
-        t.forward(line_height * len(split_lines))
-        t.left(90)
-        t.forward(window_width)
-        t.left(90)
-    t.end_fill()
-    for line in split_lines:
-        t.forward(line_height)
-        t.write(line, font=font)
+    t.display_error()
 
 
 class TraceRunner(object):
@@ -378,23 +359,27 @@ class TraceRunner(object):
         self.return_code = None
         self.standard_files = StandardFiles()
 
-    def trace_turtle(self, source, width: int = 0, height: int = 0):
+    def trace_turtle(self, source, width: int = 0, height: int = 0, *extra_args):
         MockTurtle.monkey_patch()
         try:
             with replace_input(source):
-                self.trace_command(['space_tracer',
-                                    '--traced_file', PSEUDO_FILENAME,
-                                    '--source_width', '0',
-                                    '--width', str(width),
-                                    '--height', str(height),
-                                    '--live',
-                                    PSEUDO_FILENAME])
+                report = self.trace_command(['space_tracer',
+                                             '--traced_file', PSEUDO_FILENAME,
+                                             '--source_width', '0',
+                                             '--width', str(width),
+                                             '--height', str(height),
+                                             '--live',
+                                             *extra_args,
+                                             PSEUDO_FILENAME])
 
-            return '\n'.join(MockTurtle.get_all_reports())
+            turtle_report = '\n'.join(MockTurtle.get_all_reports())
+            if turtle_report or not self.return_code:
+                return turtle_report
+            return report
         finally:
             MockTurtle.remove_monkey_patch()
 
-    def trace_code(self, source):
+    def trace_code(self, source, *extra_args):
         """ Trace a module of source code.
 
         :param str source: source code to trace and run.
@@ -404,6 +389,7 @@ class TraceRunner(object):
                                        '--traced_file', PSEUDO_FILENAME,
                                        '--source_width', '0',
                                        '--live',
+                                       *extra_args,
                                        PSEUDO_FILENAME])
 
     def trace_command(self, command_args=None):
@@ -420,6 +406,14 @@ class TraceRunner(object):
                 was_patched = True
             else:
                 MockTurtle.monkey_patch(self.canvas)
+        plt = sys.modules.get('matplotlib.pyplot')
+        if plt is not None:
+            # Clear any plot state from previous runs.
+            plt.close()
+            plt.live_coding_size = (args.width, args.height)
+            if args.zoomed:
+                plt.live_coding_zoom()
+
         self.standard_files['stdin'] = args.stdin
         self.standard_files['stdout'] = args.stdout
         self.standard_files['stderr'] = args.stderr
@@ -427,8 +421,11 @@ class TraceRunner(object):
 
         ReportBuilder.hide = args.hide
         ReportBuilder.is_using_traced_blocks = False
-        builder = ReportBuilder(self.message_limit)
+        builder = ReportBuilder(self.message_limit, args.millisecond_limit)
         builder.max_width = self.max_width
+        if args.canvas_only:
+            ReportBuilder.is_using_traced_blocks = True
+            builder.trace_block(-1, -2)  # Disable tracing.
         if args.start_line or args.end_line:
             builder.trace_block(args.start_line, args.end_line)
 
@@ -473,7 +470,8 @@ class TraceRunner(object):
             self.return_code = 1
             messages = traceback.format_exception_only(type(ex), ex)
             message = messages[-1].strip()
-            if ex.filename == PSEUDO_FILENAME:
+            if (ex.filename == PSEUDO_FILENAME or
+                    ex.filename == traced_importer.traced_file):
                 line_number = ex.lineno
             else:
                 line_number = 1
@@ -483,6 +481,9 @@ class TraceRunner(object):
             builder.add_message(message, line_number)
             if args.canvas:
                 display_error_on_canvas()
+        except SourceLoadError as ex:
+            builder.add_message(str(ex), 1)
+            self.return_code = 1
         except BaseException as ex:
             self.return_code = getattr(ex, 'code', 1)
             etype, value, tb = sys.exc_info()
@@ -511,9 +512,14 @@ class TraceRunner(object):
                        traced_importer.driver_finder)
         is_traced = (traced_importer.is_traced_module_imported or
                      (used_finder and used_finder.is_tracing))
-        source_code = (is_traced and
-                       used_finder and
-                       used_finder.source_code) or ''
+        if not is_traced:
+            source_code = ''
+        elif used_finder and used_finder.source_code and used_finder.is_tracing:
+            source_code = used_finder.source_code
+        elif traced_importer and traced_importer.source_code:
+            source_code = traced_importer.source_code
+        else:
+            source_code = ''
         source_lines = source_code.splitlines()
         if source_lines and traced_importer.is_live:
             total_lines = len(source_lines)
@@ -521,7 +527,7 @@ class TraceRunner(object):
             total_lines = 0
         report = builder.report(total_lines)
         source_width = args.source_width
-        if source_code is None or source_width == 0:
+        if source_code is None or source_width == 0 or not source_lines:
             reported_source_lines = []
             indent = 0
         else:
@@ -591,6 +597,8 @@ class TraceRunner(object):
             turtle_report = MockTurtle.get_all_reports()
             if not was_patched:
                 MockTurtle.remove_monkey_patch()
+        if args.canvas_only:
+            report = report.strip()
         if turtle_report and args.canvas:
             report = ('start_canvas\n' +
                       '\n'.join(turtle_report) +
@@ -660,6 +668,10 @@ class TraceRunner(object):
                 if used_finder.traced_node:
                     find_line_numbers(used_finder.traced_node, line_numbers)
                     is_minimum = False
+                elif used_finder.source_tree is None:
+                    is_minimum = True
+                elif not used_finder.is_tracing:
+                    is_minimum = True
                 else:
                     find_line_numbers(used_finder.source_tree, line_numbers)
                     is_minimum = True

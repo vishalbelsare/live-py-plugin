@@ -1,25 +1,44 @@
 Live Coding in Python
 =====================
 
-[![Build Status]][actions]
+[![Python Build Status]][actions]
+[![HTML Build Status]][actions]
 [![Code Coverage]][codecov]
+[![OpenSSF Best Practices]][openssf]
 [![PyCharm downloads]][pycharm plugin]
+[![Emacs downloads]][emacs plugin]
 [![Sublime downloads]][sublime plugin]
-[![Package Version]][pypi]
+[![space-tracer downloads]][space-tracer]
+[![Supported Python versions]][space-tracer]
+[![DOI]][zenodo]
 
 Visualize your Python code while you type it in PyCharm, Emacs, Sublime Text, or
 even your browser.
 
-[Package Version]: https://badge.fury.io/py/space-tracer.svg
-[pypi]: https://pypi.org/project/space-tracer/
-[Build Status]: https://github.com/donkirkby/live-py-plugin/actions/workflows/build.yml/badge.svg?branch=master
+[Python Build Status]: https://github.com/donkirkby/live-py-plugin/actions/workflows/py-build.yml/badge.svg?branch=master
+[HTML Build Status]: https://github.com/donkirkby/live-py-plugin/actions/workflows/html-build.yml/badge.svg?branch=master
 [actions]: https://github.com/donkirkby/live-py-plugin/actions
-[Code Coverage]: https://codecov.io/github/donkirkby/live-py-plugin/coverage.svg?branch=master
-[codecov]: https://codecov.io/github/donkirkby/live-py-plugin?branch=master
+[Code Coverage]: https://codecov.io/gh/donkirkby/live-py-plugin/coverage.svg
+[codecov]: https://app.codecov.io/gh/donkirkby/live-py-plugin
+[OpenSSF Best Practices]: https://bestpractices.coreinfrastructure.org/projects/7182/badge
+[openssf]: https://bestpractices.coreinfrastructure.org/projects/7182
 [PyCharm downloads]: https://img.shields.io/jetbrains/plugin/d/9742?label=PyCharm%20%E2%86%93
 [pycharm plugin]: https://plugins.jetbrains.com/plugin/9742
+[Emacs downloads]: https://img.shields.io/badge/Emacs%20%E2%86%93-459k-brightgreen
+[emacs plugin]: https://melpa.org/#/live-py-mode
 [Sublime downloads]: https://img.shields.io/packagecontrol/dt/Live%20Coding%20in%20Python?label=Sublime%20%E2%86%93
 [sublime plugin]: https://packagecontrol.io/packages/Live%20Coding%20in%20Python
+[space-tracer downloads]: https://static.pepy.tech/personalized-badge/space-tracer?left_color=grey&right_color=brightgreen&left_text=space-tracer%20%E2%86%93&period=total
+[space-tracer]: https://pypi.org/project/space-tracer/
+[Supported Python versions]: https://img.shields.io/pypi/pyversions/space-tracer.svg
+[DOI]: https://zenodo.org/badge/4332096.svg
+[zenodo]: https://zenodo.org/badge/latestdoi/4332096
+
+Live coding tightens the feedback loop between making a change to your code
+and seeing the behaviour change. As you type your code, it will run over and
+over, showing a visualization of the program state, a matplotlib graph, a
+Pillow image, or turtle graphics. If you make a mistake, you'll immediately see
+the problem and where it went wrong.
 
 To see how to use one of the Live Coding in Python plugins, watch the
 [demo video][video] or read the getting started pages for [PyCharm], [Emacs],
@@ -30,9 +49,10 @@ in the [tools folder][tools]. To learn more, read about [how it works][how].
 
 ![Screenshot of a star diagram][screenshot]
 
-Special thanks to [James Davies] for contributing the Sublime Text support, and
+Special thanks to [James Davies] for contributing the Sublime Text support,
 to [Antti Kaihola][akaihola] and [Christoph Paulik][cpaulik] for
-contributing the Emacs support. Thanks to [all the contributors][hatrack] for
+contributing the Emacs support, and to [Brecht Willems] for the idea of flag
+tutorials. Thanks to [all the contributors][hatrack] for
 helping in all kinds of ways, and thanks to [JetBrains] for the free PyCharm and
 IDEA licenses.
 
@@ -49,11 +69,14 @@ If you like this project, check out some of my [other projects][projects].
 [Sublime Text]: https://donkirkby.github.io/live-py-plugin/starting_sublime_text.html
 [Space Tracer]: https://donkirkby.github.io/live-py-plugin/space_tracer.html
 [James Davies]: https://github.com/Derfies
+[Brecht Willems]: https://github.com/BTWS2
 
 Feature Comparison
 ------------------
 So far, the Emacs mode seems to be the most popular way to use live coding in
-Python. The PyCharm plugin has the most features.
+Python, and the PyCharm plugin has the most features. The browser version might
+be the best for students, because it has tutorials and doesn't need to be
+installed.
 
 
 | Feature              | PyCharm |  Emacs  | Sublime | browser | space_tracer |
@@ -64,9 +87,10 @@ Python. The PyCharm plugin has the most features.
 | errors and exceptions|    Y    |    Y    |    Y    |    Y    |       Y      |
 | print function       |    Y    |    Y    |    Y    |    Y    |       Y      |
 | unit tests           |    Y    |    Y    |    Y    |         |       Y      |
-| turtle graphics      |    Y    |         |         |         |              |
+| turtle graphics      |    Y    |         |         |    Y    |              |
 | matplotlib preview   |    Y    |         |    Y    |         |              |
 | pyglet preview       |    Y    |         |    Y    |         |              |
+| tutorials and goals  |         |         |         |    Y    |              |
 
 If you find the project useful, help us [make it better][contributing].
 
@@ -80,11 +104,11 @@ Python interpreter, and you can run a Python script normally.
 2. Click on the Plugins section.
 3. Click the Browse Repositories... button.
 4. Type live coding in the search box, and click on the "Live Coding in Python"
-    entry in the list below.
+   entry in the list below.
 5. Click the green Install button on the right.
 6. Click the Restart PyCharm button.
 7. Close all the dialog boxes by clicking OK, then let PyCharm restart when it
-    asks.
+   asks.
 8. Open a Python file.
 9. Run the Python file normally, as a script or a unit test.
 10. With the same run configuration selected in the drop down, choose Start
@@ -106,17 +130,18 @@ section, but the next section gives instructions for installing without MELPA.
 
 1. [Install GNU Emacs] if you don't already have it.
 2. [Install MELPA][melpa]. You probably want to follow the instructions
-    for the stable version, instead of the default bleeding-edge version.
+   for the stable version, instead of the default bleeding-edge version.
 3. Launch the package installer with `M-x package-list-packages`.
-4. Find the package with `C-s live-py-mode`.
+4. Find the package with `C-s live-py-mode`. If you can't find it, run
+   `M-x package-refresh-contents`, and try again.
 5. Mark the package to install with `i`, then execute the installation with
-    `x`.
+   `x`.
 6. Open any Python file, and activate live-py-mode with `M-x live-py-mode`.
    You should see an extra window on the right that shows the results of running
    your code.
 7. Type `C-h m` and scroll down to the **Live-Py** section to see all the
-    advanced features that let you run other versions of Python or drive your
-    live coding from another script or a unit test.
+   advanced features that let you run other versions of Python or drive your
+   live coding from another script or a unit test.
 
 [melpa]: https://melpa.org/#/getting-started
 

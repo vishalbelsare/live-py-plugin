@@ -67,6 +67,7 @@ line 2
     it('hides analysis if known to be static', () => {
         let goalSourceCode = undefined,
             goalOutput = undefined,
+            goalCanvasCommands = undefined,
             isLive = false,
             expectedSource = `\
 line 1
@@ -76,6 +77,7 @@ line 2
             expectedSource,
             prefixLines,
             goalOutput,
+            goalCanvasCommands,
             goalSourceCode,
             isLive);
 
@@ -172,6 +174,40 @@ out line B
         expect(analyst.output).toBe(expectedOutput);
     });
 
+    it('ignores second header in static sample', () => {
+        let originalSource = `\
+### static ###
+### live ###
+line 1
+line B
+### goal ###
+line 1
+line 2
+`;
+        let analyst = new SampleAnalyst(originalSource, prefixLines);
+
+        expect(analyst.output).toBeUndefined();
+    });
+
+    it('ignores leading blank lines', () => {
+        let originalSource = `\
+
+### live ###
+line 1
+line B
+### goal ###
+line 1
+line 2
+`;
+        let expectedOutput = `\
+out line 1
+out line B
+`;
+        let analyst = new SampleAnalyst(originalSource, prefixLines);
+
+        expect(analyst.output).toBe(expectedOutput);
+    });
+
     it('ignores goal without heading', () => {
         let originalSource = `\
 line 1
@@ -226,6 +262,7 @@ line 1
 line 2
 `,
             oldGoal = undefined,
+            oldGoalCommands = undefined,
             expectedGoal = `\
 out line 1
 out line 2
@@ -234,6 +271,7 @@ out line 2
             source,
             prefixLines,
             oldGoal,
+            oldGoalCommands,
             oldGoalSource);
 
         expect(analyst.sourceCode).toBe(source);
@@ -257,7 +295,7 @@ Line the second
                 startCol: 4,
                 endRow: 0,
                 endCol: 10,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             },
             {
@@ -267,7 +305,7 @@ Line the second
                 startCol: 4,
                 endRow: 1,
                 endCol: 5,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             },
             {
@@ -277,7 +315,7 @@ Line the second
                 startCol: 9,
                 endRow: 1,
                 endCol: 19,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             }
         ];
@@ -289,7 +327,7 @@ Line the second
                 startCol: 8,
                 endRow: 0,
                 endCol: 10,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             },
             {
@@ -299,7 +337,7 @@ Line the second
                 startCol: 4,
                 endRow: 1,
                 endCol: 5,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             },
             {
@@ -309,7 +347,7 @@ Line the second
                 startCol: 9,
                 endRow: 1,
                 endCol: 10,
-                className: 'change-marker warning',
+                className: 'change-marker is-warning',
                 type: 'text'
             }
         ];
@@ -344,6 +382,13 @@ create_line
     50
     fill='black'
     pensize=1
+create_line
+    50
+    150
+    150
+    150
+    fill='black'
+    pensize=1.5
 end_canvas
 .
 x = 1
@@ -366,6 +411,12 @@ x = 1
                     fill: 'black',
                     pensize: 1,
                     coords: [50, 50, 150, 50]
+                },
+                {
+                    name: 'create_line',
+                    fill: 'black',
+                    pensize: 1.5,
+                    coords: [50, 150, 150, 150]
                 }];
         let analyst = new SampleAnalyst(source, run);
 
@@ -378,15 +429,21 @@ x = 1
 
     it('parses font options', () => {
         let run = () => {
-            let display = `\
-start_canvas
+            let display = String.raw`start_canvas
 create_text
     100
     0
     anchor='sw'
     fill='black'
     font=('Courier', 14, 'bold')
-    text='Bob'
+    text='Bob with quotes "\' and\r\n\t\x03whitespace.'
+create_text
+    100
+    20
+    anchor='sw'
+    fill='black'
+    font=('Courier', 14, 'bold')
+    text="Bob's secret message with a \\backslash."
 end_canvas
 .
 x = 1
@@ -403,11 +460,83 @@ line 1
                     fill: 'black',
                     anchor: 'sw',
                     font: 'bold 14px Courier',
-                    text: 'Bob',
+                    text: 'Bob with quotes "\' and\r\n\t\x03whitespace.',
                     coords: [100, 0]
+                },
+                {
+                    name: 'create_text',
+                    fill: 'black',
+                    anchor: 'sw',
+                    font: 'bold 14px Courier',
+                    text: "Bob's secret message with a \\backslash.",
+                    coords: [100, 20]
                 }];
         let analyst = new SampleAnalyst(source, run);
 
         expect(analyst.canvasCommands).toEqual(expectedCanvasCommands);
+    });
+
+    it('displays canvas goal', () => {
+        let run = (sourceCode) => {
+            let sourceLines = sourceCode.split("\n");
+            let display = `\
+start_canvas
+create_text
+    100
+    0
+    anchor='sw'
+    fill='black'
+    font=('Courier', 14, 'bold')
+    text='${sourceLines[0]}'
+end_canvas
+.
+${sourceCode}`;
+                return {get(i) { return [display, ''][i]; }};
+            };
+        let originalSource = `\
+### Canvas ###
+line A
+line 2
+### Goal ###
+line 1
+line 2
+`;
+        let expectedSource = `\
+line A
+line 2
+`;
+        let expectedDisplay = `\
+line A
+line 2
+`;
+        let expectedCanvasCommands = [
+                {
+                    name: 'create_text',
+                    fill: 'black',
+                    anchor: 'sw',
+                    font: 'bold 14px Courier',
+                    text: 'line A',
+                    coords: [100, 0]
+                }];
+        let expectedGoalCanvasCommands = [
+                {
+                    name: 'create_text',
+                    fill: 'black',
+                    anchor: 'sw',
+                    font: 'bold 14px Courier',
+                    text: 'line 1',
+                    coords: [100, 0]
+                }];
+        let expectedOutput = '';
+        let expectedGoalOutput = `\
+`;
+        let analyst = new SampleAnalyst(originalSource, run);
+
+        expect(analyst.sourceCode).toBe(expectedSource);
+        expect(analyst.display).toBe(expectedDisplay);
+        expect(analyst.output).toBe(expectedOutput);
+        expect(analyst.goalOutput).toBe(expectedGoalOutput);
+        expect(analyst.canvasCommands).toEqual(expectedCanvasCommands);
+        expect(analyst.goalCanvasCommands).toEqual(expectedGoalCanvasCommands);
     });
 });

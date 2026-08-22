@@ -1,7 +1,110 @@
 import { diffChars } from 'diff';
 
-function unescapeString(s) {
-    return Function('"use strict";return (' + s + ')')();
+function unescapeString(value) {
+    if ((value.startsWith("'") && value.endsWith("'")) ||
+        (value.startsWith('"') && value.endsWith('"'))) {
+        value = value.substring(1, value.length - 1);
+        let newValue = '';
+        for (let i = 0; i < value.length; i++) {
+            const c = value[i];
+            if (c !== '\\' || i === value.length - 1) {
+                newValue += c;
+            } else {
+                const c2 = value[++i];
+                switch (c2) {
+                    case '\\':
+                        newValue += '\\';
+                        break;
+                    case '\'':
+                        newValue += '\'';
+                        break;
+                    case 'n':
+                        newValue += '\n';
+                        break;
+                    case 'r':
+                        newValue += '\r';
+                        break;
+                    case 't':
+                        newValue += '\t';
+                        break;
+                    case 'x':
+                        if (i+2 < value.length)
+                        {
+                            const charCode = parseInt(
+                                value.substring(i+1, i+3),
+                                16);
+                            newValue += String.fromCharCode(charCode);
+                            i += 2;
+                            break;
+                        }
+                        newValue += c;
+                        newValue += c2;
+                        break;
+                    default:
+                        newValue += c;
+                        newValue += c2;
+                        break;
+                }
+            }
+        }
+        value = newValue;
+    } else if (value.match(/^[\d.]+$/)) {
+        value = parseFloat(value);
+    }
+    return value;
+}
+
+function parseCanvasCommands(display) {
+    const displayLines = display.split(/\r\n|(?!\r\n)[\n-\r\x85\u2028\u2029]/),
+        canvasCommands = [],
+        imagePromises = [];
+    displayLines.shift();  // start_canvas
+    let currentCommand = undefined;
+    while (displayLines.length) {
+        const nextLine = displayLines.shift();
+        if (nextLine === '.') {
+            break;
+        }
+        if ( ! nextLine.startsWith('    ')) {
+            if (currentCommand !== undefined) {
+                if (currentCommand.name === 'create_image') {
+                    const image = new Image();
+                    image.src = 'data:image/png;base64,' + currentCommand.image;
+                    currentCommand.image = image;
+                    imagePromises.push(image.decode());
+                }
+                canvasCommands.push(currentCommand);
+            }
+            currentCommand = {name: nextLine, coords: []};
+        } else {
+            const position = nextLine.indexOf('=');
+            if (position === -1) {
+                currentCommand.coords.push(parseInt(nextLine));
+            } else {
+                const fieldName = nextLine.substring(4, position),
+                    fieldValue = nextLine.substring(position+1);
+                if (fieldName !== 'font') {
+                    currentCommand[fieldName] = unescapeString(
+                        fieldValue);
+                } else {
+                    const fontMatch = fieldValue.match(
+                        /\('([^']*)', (\d+), '([^']*)'\)/);
+                    let fontName = 'Arial',
+                        fontSize = 8,
+                        styleNames = 'normal';
+                    if (fontMatch !== undefined) {
+                        fontName = fontMatch[1];
+                        fontSize = fontMatch[2];
+                        styleNames = fontMatch[3];
+                    }
+                    currentCommand[fieldName] = (
+                        `${styleNames} ${fontSize}px ${fontName}`);
+                }
+            }
+        }
+    }
+    const remainingDisplay = displayLines.join('\n');
+    return [canvasCommands, remainingDisplay, imagePromises];
 }
 
 export default class SampleAnalyst {
@@ -9,10 +112,13 @@ export default class SampleAnalyst {
     constructor(sourceCode,
                 run,
                 goalOutput,
+                goalCanvasCommands,
                 goalSourceCode,
                 isLive,
                 isCanvas,
                 canvasSize) {
+        this.imagePromises = [];
+
         if (goalSourceCode !== undefined) {
             this.sourceCode = sourceCode;
             this.goalSourceCode = goalSourceCode;
@@ -28,10 +134,10 @@ export default class SampleAnalyst {
             this.isCanvas = isCanvas;
         } else {
             let sourcePieces =
-                /^(.*\n)?( *##+ *((static)|(live)|(canvas))[ #]*\n)(.*)$/is.exec(
+                /^(\s*)(##+ *((static)|(live)|(canvas))[ #]*\n)(.*)$/is.exec(
                     sourceCode);
             if (sourcePieces !== null) {
-                this.sourceCode = (sourcePieces[1] || "") + sourcePieces[7];
+                this.sourceCode = sourcePieces[7];
                 this.isLive = sourcePieces[3].toLowerCase() !== "static";
                 this.isCanvas = sourcePieces[3].toLowerCase() === "canvas";
             } else if (/>>>/.test(sourceCode)) {
@@ -41,7 +147,10 @@ export default class SampleAnalyst {
             } else {
                 this.isLive = true;
                 this.isCanvas = false;
-                let splitSource = sourceCode.split(/ *##+ *Goal[ #]*\n/i);
+                this.sourceCode = sourceCode;
+            }
+            if (this.isLive) {
+                let splitSource = this.sourceCode.split(/ *##+ *Goal[ #]*\n/i);
                 this.sourceCode = splitSource[0];
                 this.goalSourceCode = splitSource[1];
             }
@@ -57,55 +166,26 @@ export default class SampleAnalyst {
             this.output = result.get(1);
 
             if (this.isCanvas) {
-                const displayLines = this.display.split(
-                    /\r\n|(?!\r\n)[\n-\r\x85\u2028\u2029]/);
-                displayLines.shift();  // start_canvas
-                this.canvasCommands = [];
-                let currentCommand = undefined;
-                while (displayLines.length) {
-                    const nextLine = displayLines.shift();
-                    if (nextLine === '.') {
-                        break;
-                    }
-                    if ( ! nextLine.startsWith('    ')) {
-                        if (currentCommand !== undefined) {
-                            this.canvasCommands.push(currentCommand);
-                        }
-                        currentCommand = {name: nextLine, coords: []};
-                    } else {
-                        const position = nextLine.indexOf('=');
-                        if (position === -1) {
-                            currentCommand.coords.push(parseInt(nextLine));
-                        } else {
-                            const fieldName = nextLine.substring(4, position),
-                                fieldValue = nextLine.substring(position+1);
-                            if (fieldName !== 'font') {
-                                currentCommand[fieldName] = unescapeString(
-                                    fieldValue);
-                            } else {
-                                const fontMatch = fieldValue.match(
-                                    /\('([^']*)', (\d+), '([^']*)'\)/);
-                                let fontName = 'Arial',
-                                    fontSize = 8,
-                                    styleNames = 'normal';
-                                if (fontMatch !== undefined) {
-                                    fontName = fontMatch[1];
-                                    fontSize = fontMatch[2];
-                                    styleNames = fontMatch[3];
-                                }
-                                currentCommand[fieldName] = (
-                                    `${styleNames} ${fontSize}px ${fontName}`);
-                            }
-                        }
-                    }
-                }
-                this.display = displayLines.join('\n');
+                const [
+                    canvasCommands,
+                    remainingDisplay,
+                    imagePromises] = parseCanvasCommands(this.display);
+                this.canvasCommands = canvasCommands;
+                this.display = remainingDisplay;
+                this.imagePromises.push(...imagePromises);
             }
             if (goalOutput !== undefined) {
                 this.goalOutput = goalOutput;
+                this.goalCanvasCommands = goalCanvasCommands;
             } else if (this.goalSourceCode !== undefined) {
-                let goalResult = run(this.goalSourceCode);
+                let goalResult = run(this.goalSourceCode, canvasSize);
                 this.goalOutput = goalResult.get(1);
+                if (this.isCanvas) {
+                    const goalDisplay = goalResult.get(0),
+                        displayParts = parseCanvasCommands(goalDisplay);
+                    this.goalCanvasCommands = displayParts[0];
+                    this.imagePromises.push(...displayParts[2]);
+                }
             }
             if (this.goalOutput !== undefined) {
                 let diffs = diffChars(this.goalOutput, this.output),
@@ -131,7 +211,7 @@ export default class SampleAnalyst {
                             startCol: goalColumnNumber,
                             endRow: lastGoalLine,
                             endCol: lastGoalColumn,
-                            className: "change-marker warning",
+                            className: "change-marker is-warning",
                             type: "text",
                             added: diff.added,
                             removed: diff.removed

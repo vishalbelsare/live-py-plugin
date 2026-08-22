@@ -149,7 +149,7 @@ if __name__ == '__live_coding__': |
         '--traced', 'example_source',
         EXAMPLE_DRIVER_PATH])
 
-    assert expected_report == report
+    assert report == expected_report
 
 
 def test_default_traced():
@@ -470,15 +470,7 @@ def test_unknown_traced_file():
     expected_report = """\
 --------------------------------------------------------------------- |
 example_driver.py doesn't call bogus_file.py. Try a different driver. |
---------------------------------------------------------------------- |
-
-
-
-
-
-
-
-"""
+--------------------------------------------------------------------- |"""
 
     with replace_input(code):
         report = TraceRunner().trace_command([
@@ -814,6 +806,7 @@ def bar(n):            | n = 3
         report = tracer.trace_command([
             'space_tracer',
             '--traced_file', 'example.py',
+            '--millisecond_limit', '0',
             'example.py'])
 
     assert report == expected_report
